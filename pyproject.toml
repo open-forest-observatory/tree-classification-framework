@@ -1,11 +1,11 @@
 [project]
 name = "tree-classification-framework"
 version = "0.1.0"
-description = "Scripts and utilities for view-level tree classification\""
+description = "Scripts and utilities for view-level tree classification"
 authors = [
     {name = "David Russell",email = "djrussell@ucdavis.edu"}
 ]
-license = "GPL-3"
+license = "GPL-3.0-or-later"
 requires-python = ">=3.13"
 dependencies = [
 ]
