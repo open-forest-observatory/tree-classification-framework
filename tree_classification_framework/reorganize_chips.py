@@ -137,11 +137,15 @@ def main(
                         f"[{dataset_dir.name}] column '{dead_trees_attribute}' not found in {gpkg_path.name}; "
                         f"available columns: {list(trees.columns)}"
                     )
-                trees = trees[trees[dead_trees_attribute] == "Live"]
+                live_trees = trees[dead_trees_attribute] == "Live"
+                dead_tree_IDs = trees.loc[~live_trees, ID_COLUMN].tolist()
+                trees = trees[live_trees]
 
                 print(
                     f"Dropped {n_total - len(trees)} of {n_total} trees predicted as dead from {dataset_dir.name}"
                 )
+            else:
+                dead_tree_IDs = []
 
             for required in (ID_COLUMN, attribute):
                 if required not in trees.columns:
@@ -176,8 +180,13 @@ def main(
                 if output_class is None:
                     if unique_id in raw_by_id:
                         skipped_unmapped[str(raw_by_id[unique_id])] += 1
+                    elif unique_id in dead_tree_IDs:
+                        # This tree was dropped because it was predicted as dead
+                        pass
                     else:
-                        chips_without_tree += 1
+                        raise ValueError(
+                            f"Unique ID {unique_id} not found in {gpkg_path.name}"
+                        )
                     continue
 
                 class_dir = output_dir / train_val / output_class
