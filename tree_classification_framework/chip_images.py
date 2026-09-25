@@ -1,6 +1,7 @@
 import json
 import tempfile
 import warnings
+import shutil
 from argparse import ArgumentParser, BooleanOptionalAction
 from multiprocessing import Pool
 from pathlib import Path
@@ -47,8 +48,8 @@ FRAC_OF_MAX_SIZE = 0.5
 
 
 def extract_shapes_from_mask(
-    mask_path: str,
-    output_path: str,
+    mask_path: str | Path,
+    output_path: str | Path,
     render_null_ID: int = RENDER_NULL_ID,
     frac_of_max_size: float = FRAC_OF_MAX_SIZE,
 ):
@@ -57,8 +58,8 @@ def extract_shapes_from_mask(
     different unique values within the mask.
 
     Args:
-        mask_path (str): Path to a one-channel integer image, where unique IDs define the different trees
-        output_path (str): Where to save the vector results. Parent directory will be created if needed.
+        mask_path (str | Path): Path to a one-channel integer image, where unique IDs define the different trees
+        output_path (str | Path): Where to save the vector results. Parent directory will be created if needed.
         render_null_ID (int, optional): The ID of the background content in the mask, which is not included. Defaults to RENDER_NULL_ID.
         frac_of_max_size (float, optional): Polygons with an area less than or equal to this fraction of the largest polygon with the same ID are removed. Defaults to FRAC_OF_MAX_SIZE.
     """
@@ -260,7 +261,7 @@ def subset_shapes(
     Subset a GeoDataFrame of tree shapes to at most n_chips_per_tree chips per tree ID,
     filtering out chips that are too small to be useful.
 
-    shapes (gpd.GeoDataFrame):
+    shapes (pd.DataFrame):
         A dataframe of shapes with "IDs" and "min_dim" attributes.
     n_chips_per_tree (int):
         Maximum number of chips to retain per tree ID.
@@ -271,7 +272,7 @@ def subset_shapes(
         threshold is never set higher than this value.
 
     Returns:
-        gpd.GeoDataFrame: Filtered and sampled subset of the input shapes.
+        pd.DataFrame: Filtered and sampled subset of the input shapes.
     """
     # Compute the minimum size per ID, by selecting the 2*n_chips_per_tree th highest size
     min_size_per_ID = shapes.groupby("IDs").apply(
@@ -306,13 +307,13 @@ def subset_shapes(
 
 
 def process_folder(
-    images_folder,
-    renders_folder,
-    output_dir,
-    images_ext=".JPG",
-    renders_ext=".tif",
-    n_workers=1,
-    ensure_all_images_have_renders=False,
+    images_folder: str | Path,
+    renders_folder: str | Path,
+    output_dir: str | Path,
+    images_ext: str = ".JPG",
+    renders_ext: str = ".tif",
+    n_workers: int = 1,
+    ensure_all_images_have_renders: bool = False,
     mask_background: bool = MASK_BACKGROUND,
     mask_buffer_pixels: int = MASK_BUFFER_PIXELS,
     background_value: tuple = BACKGROUND_VALUE,
@@ -321,7 +322,7 @@ def process_folder(
     bbox_padding_ratio: float = BBOX_PADDING_RATIO,
     n_chips_per_tree: int = N_CHIPS_PER_TREE,
     frac_of_max_size: float = FRAC_OF_MAX_SIZE,
-) -> tuple:
+) -> None:
     """
     Chip every image in a folder based on a folder of mask images with a parellel structure, writing
     out the results in a parellel structure as the inputs. For more information, inspect the docstring
@@ -329,6 +330,7 @@ def process_folder(
     """
     images_folder = Path(images_folder)
     renders_folder = Path(renders_folder)
+    output_dir = Path(output_dir)
 
     image_files = sorted(images_folder.rglob(f"*{images_ext}"))
     render_files = sorted(renders_folder.rglob(f"*{renders_ext}"))
@@ -351,6 +353,10 @@ def process_folder(
             raise ValueError(
                 f"{len(additional_images)} images do not have a corresponding renders. The first 10 are {list(additional_images)[:10]}"
             )
+
+    # If all checks succeed and the output folder is present, delete it
+    if output_dir.is_dir():
+        shutil.rmtree(output_dir)
 
     # Where the vector representation of the masks is stored
     shapes_dir = tempfile.TemporaryDirectory()
@@ -472,11 +478,32 @@ def process_folder(
 
 def parse_args():
     parser = ArgumentParser()
-    parser.add_argument("images_folder")
-    parser.add_argument("renders_folder")
-    parser.add_argument("output_folder")
-    parser.add_argument("--n-workers", type=int, default=1)
-    parser.add_argument("--ensure-all-images-have-renders", action="store_true")
+    parser.add_argument(
+        "images_folder",
+        type=Path,
+        help="Path to a folder of input RGB images to be chipped",
+    )
+    parser.add_argument(
+        "renders_folder",
+        type=Path,
+        help="Path to a folder of one-channel label images (.tif) representing the masks for each tree. This structure should exactly parallel the input images.",
+    )
+    parser.add_argument(
+        "output_folder",
+        type=Path,
+        help="Where to saved the chipped data. The folder structure will parallel that of the input data, with one folder per original image. Each leaf folder will contain an image per tree.",
+    )
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=1,
+        help="This process is highly parallelizable so you can run it multiprocessed",
+    )
+    parser.add_argument(
+        "--ensure-all-images-have-renders",
+        action="store_true",
+        help="Fail if any images do not have a corresponding render",
+    )
     parser.add_argument(
         "--mask-background",
         default=MASK_BACKGROUND,
