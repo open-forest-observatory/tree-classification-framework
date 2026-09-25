@@ -61,10 +61,6 @@ def extract_shapes_from_mask(
     mask_ids = imread(mask_path)  # load tif tree id mask
     mask_ids = np.squeeze(mask_ids)  # (H, W, 1) -> (H, W)
 
-    if mask_ids.dtype == np.uint32:
-        # Indicates a mallformed image in the current experiments
-        return
-
     # The background is all non-tree pixels
     individual_shapes = list(shapes(mask_ids, mask=mask_ids != render_null_ID))
 
@@ -171,14 +167,14 @@ def save_chips(
         ["frac_of_max", "polygon_area", "polygon_area_max"], axis=1, inplace=True
     )
 
+    # Check that all items can be remapped
+    if not (shapes_gdf.IDs.isin(IDs_to_labels.keys())).all():
+        un_mapped_values = list(
+            set(list(shapes_gdf.IDs.unique())) - set(list(IDs_to_labels.keys()))
+        )
+        raise ValueError(f"Not all values could be remapped: {un_mapped_values}")
     # This cannot be done inplace in modern versions of pandas
     shapes_gdf.IDs = shapes_gdf.IDs.replace(IDs_to_labels)
-    # Check that all items were remapped
-    if not (shapes_gdf.IDs.isin(IDs_to_labels.values())).all():
-        un_mapped_values = list(
-            set(list(shapes_gdf.IDs.unique())) - set(list(IDs_to_labels.values()))
-        )
-        raise ValueError(f"Not all values were remapped: {un_mapped_values}")
 
     # Make the output folder
     Path(output_folder).mkdir(exist_ok=True, parents=True)
@@ -318,7 +314,7 @@ def process_folder(
     image_res_min_size: int = IMAGE_RES_MIN_SIZE,
     image_res_sufficient_size: int = IMAGE_RES_SUFFICIENT_SIZE,
     bbox_padding_ratio: float = BBOX_PADDING_RATIO,
-    n_chips_per_tree=10,
+    n_chips_per_tree: int = N_CHIPS_PER_TREE,
 ) -> tuple:
     """
     Chip every image in a folder based on a folder of mask images with a parellel structure, writing
@@ -375,6 +371,10 @@ def process_folder(
         gdf = gpd.read_file(f)
         if len(gdf) > 0:
             all_dimensions.append(gdf[["filename", "min_dim", "IDs"]])
+    if len(all_dimensions) == 0:
+        raise ValueError(
+            f"No trees were found in any of the masks in {renders_folder}"
+        )
     all_dimensions = pd.concat(all_dimensions, ignore_index=True)
 
     # Apply the filtering proceedure to the two top-level folders independently, which correspond
