@@ -61,6 +61,12 @@ def extract_shapes_from_mask(
     mask_ids = imread(mask_path)  # load tif tree id mask
     mask_ids = np.squeeze(mask_ids)  # (H, W, 1) -> (H, W)
 
+    # As far as I can tell, this just means there are no trees present and this caused a max-uint32
+    # image to be saved out
+    # See the issue here: https://github.com/open-forest-observatory/geograypher/issues/230
+    if np.all(mask_ids == 2147483648):
+        return
+
     # The background is all non-tree pixels
     individual_shapes = list(shapes(mask_ids, mask=mask_ids != render_null_ID))
 
@@ -68,21 +74,16 @@ def extract_shapes_from_mask(
     if len(individual_shapes) == 0:
         return
 
-    # Extract the potentially-multiple polygons from each shape along with the original value,
+    # Extract the polygon or multipolygon from each shape along with the original value,
     # now encoded as a zero-padded string
-    polys = [
-        (shapely.Polygon(poly), int(shape[1]))
-        for shape in individual_shapes
-        for poly in shape[0]["coordinates"]
+    geometry_ids = [
+        (shapely.geometry.shape(shape[0]), int(shape[1])) for shape in individual_shapes
     ]
-    # Split into geometries and IDs and build a geodataframe
-    geometry, ids = list(zip(*polys))
+    # Split into geometries and IDs
+    geometry, ids = list(zip(*geometry_ids))
     # Create a geodataframe. Note, this data is not geospatial, but this is the easiest way abstract
     # working with vector data.
     shapes_gdf = gpd.GeoDataFrame({"geometry": geometry, "IDs": ids})
-
-    # Merge by ID, forming multipolygons as needed
-    shapes_gdf = shapes_gdf.dissolve("IDs", as_index=False)
 
     shapes_gdf["filename"] = mask_path
 
@@ -143,10 +144,8 @@ def save_chips(
     if len(shapes_gdf) == 0:
         return
 
-    # load image
-    img = Image.open(image_path)
-    # Convert to numpy array for masking
-    img_array = np.array(img) if mask_background else None
+    # load image and convert to a numpy array for masking
+    img_array = np.array(Image.open(image_path))
 
     # Store the area as an attribute for future use
     shapes_gdf["polygon_area"] = shapes_gdf.area
@@ -172,7 +171,9 @@ def save_chips(
         un_mapped_values = list(
             set(list(shapes_gdf.IDs.unique())) - set(list(IDs_to_labels.keys()))
         )
-        raise ValueError(f"Not all values could be remapped: {un_mapped_values}")
+        raise ValueError(
+            f"Not all values could be remapped: {un_mapped_values} for image {image_path}"
+        )
     # This cannot be done inplace in modern versions of pandas
     shapes_gdf.IDs = shapes_gdf.IDs.replace(IDs_to_labels)
 
@@ -192,11 +193,10 @@ def save_chips(
     pad_height = height * bbox_padding_ratio
 
     # padded coords for cropping
-    # Don't inflate by the buffering amount if no masking is applied
-    left = minx - pad_width - (mask_buffer_pixels if mask_background else 0)
-    top = miny - pad_height - (mask_buffer_pixels if mask_background else 0)
-    right = maxx + pad_width + (mask_buffer_pixels if mask_background else 0)
-    bottom = maxy + pad_height + (mask_buffer_pixels if mask_background else 0)
+    left = minx - pad_width - mask_buffer_pixels
+    top = miny - pad_height - mask_buffer_pixels
+    right = maxx + pad_width + mask_buffer_pixels
+    bottom = maxy + pad_height + mask_buffer_pixels
 
     # image shape (rows=height, cols=width)
     img_h, img_w = img_array.shape[:2]
@@ -208,6 +208,7 @@ def save_chips(
     shapes_gdf["crop_maxy"] = np.minimum(img_h, np.ceil(bottom)).astype(int)
 
     # Buffering is only required if we're masking the background, but it's best to do it upfront
+    # rather than on each iteration.
     if mask_background:
         # Catch warnings about invalid geometries
         with warnings.catch_warnings():
@@ -372,9 +373,7 @@ def process_folder(
         if len(gdf) > 0:
             all_dimensions.append(gdf[["filename", "min_dim", "IDs"]])
     if len(all_dimensions) == 0:
-        raise ValueError(
-            f"No trees were found in any of the masks in {renders_folder}"
-        )
+        raise ValueError(f"No trees were found in any of the masks in {renders_folder}")
     all_dimensions = pd.concat(all_dimensions, ignore_index=True)
 
     # Apply the filtering proceedure to the two top-level folders independently, which correspond
