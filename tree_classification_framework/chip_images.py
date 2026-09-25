@@ -42,12 +42,15 @@ IMAGE_RES_MIN_SIZE = 50
 IMAGE_RES_SUFFICIENT_SIZE = 250
 # How many chips to save out per tree
 N_CHIPS_PER_TREE = 10
+# Polygons smaller than this fraction of the largest polygon with the same ID are removed
+FRAC_OF_MAX_SIZE = 0.5
 
 
 def extract_shapes_from_mask(
     mask_path: str,
     output_path: str,
     render_null_ID: int = RENDER_NULL_ID,
+    frac_of_max_size: float = FRAC_OF_MAX_SIZE,
 ):
     """
     Take a path to a one-channel image and extract the vector representations corresponding to the
@@ -57,6 +60,7 @@ def extract_shapes_from_mask(
         mask_path (str): Path to a one-channel integer image, where unique IDs define the different trees
         output_path (str): Where to save the vector results. Parent directory will be created if needed.
         render_null_ID (int, optional): The ID of the background content in the mask, which is not included. Defaults to RENDER_NULL_ID.
+        frac_of_max_size (float, optional): Polygons with an area less than or equal to this fraction of the largest polygon with the same ID are removed. Defaults to FRAC_OF_MAX_SIZE.
     """
     mask_ids = imread(mask_path)  # load tif tree id mask
     mask_ids = np.squeeze(mask_ids)  # (H, W, 1) -> (H, W)
@@ -74,8 +78,8 @@ def extract_shapes_from_mask(
     if len(individual_shapes) == 0:
         return
 
-    # Extract the polygon or multipolygon from each shape along with the original value,
-    # now encoded as a zero-padded string
+    # Extract the geometry from each shape along with its integer ID. `shapes` returns one Polygon
+    # per connected region, so an ID split into multiple pieces will have multiple rows
     geometry_ids = [
         (shapely.geometry.shape(shape[0]), int(shape[1])) for shape in individual_shapes
     ]
@@ -85,13 +89,33 @@ def extract_shapes_from_mask(
     # working with vector data.
     shapes_gdf = gpd.GeoDataFrame({"geometry": geometry, "IDs": ids})
 
+    # Store the area as an attribute for future use
+    shapes_gdf["polygon_area"] = shapes_gdf.area
+    # Find the max area per ID
+    max_area_per_class = shapes_gdf[["polygon_area", "IDs"]].groupby("IDs").max()
+
+    # Merge the area and max area by IDs
+    shapes_gdf = shapes_gdf.join(max_area_per_class, on="IDs", rsuffix="_max")
+
+    # Compute for each polygon what fraction of the max area for that ID it is
+    shapes_gdf["frac_of_max"] = (
+        shapes_gdf["polygon_area"] / shapes_gdf["polygon_area_max"]
+    )
+    # Remove the polygons which are less than the threshold fraction of the max for that ID
+    shapes_gdf = shapes_gdf[shapes_gdf["frac_of_max"] > frac_of_max_size]
+    # Remove the columns we no longer need
+    shapes_gdf = shapes_gdf.drop(
+        ["frac_of_max", "polygon_area", "polygon_area_max"], axis=1
+    )
+    # Dissolve by IDs to get one (potentially-multipolygon) entry per ID
+    shapes_gdf = shapes_gdf.dissolve(by="IDs", as_index=False)
+
     shapes_gdf["filename"] = mask_path
 
-    # Compute the minimum dimension per chip
+    # Compute the minimum dimension per (multi)polygon
     width = shapes_gdf.bounds.maxx - shapes_gdf.bounds.minx
     height = shapes_gdf.bounds.maxy - shapes_gdf.bounds.miny
-    min_dim = np.minimum(width, height)
-    shapes_gdf["min_dim"] = min_dim
+    shapes_gdf["min_dim"] = np.minimum(width, height)
 
     # Save out
     Path(output_path).parent.mkdir(exist_ok=True, parents=True)
@@ -115,8 +139,7 @@ def save_chips(
     image_path (str):
         Path to an RGB image, which will be chipped
     shapes_path (str):
-        A path to a dataframe of shapes representing the rendered trees, containing the
-        "polygon_area" and "IDs" attributes
+        A path to a dataframe of shapes representing the rendered trees, containing the "IDs" attribute
     IDs_to_include (pd.Series):
         A series containing which IDs to produce renders for.
     output_folder (str):
@@ -146,25 +169,6 @@ def save_chips(
 
     # load image and convert to a numpy array for masking
     img_array = np.array(Image.open(image_path))
-
-    # Store the area as an attribute for future use
-    shapes_gdf["polygon_area"] = shapes_gdf.area
-    # Find the max area per ID
-    max_area_per_class = shapes_gdf[["polygon_area", "IDs"]].groupby("IDs").max()
-
-    # Merge the area and max area by IDs
-    shapes_gdf = shapes_gdf.join(max_area_per_class, on="IDs", rsuffix="_max")
-
-    # Compute for each polygon what fraction of the max area for that ID it is
-    shapes_gdf["frac_of_max"] = (
-        shapes_gdf["polygon_area"] / shapes_gdf["polygon_area_max"]
-    )
-    # Remove the polygons which are less than the threshold fraction of the max for that ID
-    shapes_gdf = shapes_gdf[shapes_gdf["frac_of_max"] > 0.5]
-    # Remove the columns we no longer need
-    shapes_gdf.drop(
-        ["frac_of_max", "polygon_area", "polygon_area_max"], axis=1, inplace=True
-    )
 
     # Check that all items can be remapped
     if not (shapes_gdf.IDs.isin(IDs_to_labels.keys())).all():
@@ -316,6 +320,7 @@ def process_folder(
     image_res_sufficient_size: int = IMAGE_RES_SUFFICIENT_SIZE,
     bbox_padding_ratio: float = BBOX_PADDING_RATIO,
     n_chips_per_tree: int = N_CHIPS_PER_TREE,
+    frac_of_max_size: float = FRAC_OF_MAX_SIZE,
 ) -> tuple:
     """
     Chip every image in a folder based on a folder of mask images with a parellel structure, writing
@@ -359,8 +364,11 @@ def process_folder(
     # Extract all vector representations of trees across all images
     with Pool(n_workers) as p:
         futures = [
-            p.apply_async(extract_shapes_from_mask, args)
-            for args in zip(render_files, output_files)
+            p.apply_async(
+                extract_shapes_from_mask,
+                (render_file, output_file, RENDER_NULL_ID, frac_of_max_size),
+            )
+            for render_file, output_file in zip(render_files, output_files)
         ]
         for f in tqdm(futures, desc="Extracting shapes from masks"):
             f.get()
@@ -513,6 +521,12 @@ def parse_args():
         default=N_CHIPS_PER_TREE,
         help="Save this many crops per tree",
     )
+    parser.add_argument(
+        "--frac-of-max-size",
+        type=float,
+        default=FRAC_OF_MAX_SIZE,
+        help="Remove polygons with an area less than or equal to this fraction of the largest polygon with the same ID (default: %(default)s).",
+    )
 
     args = parser.parse_args()
     return args
@@ -536,4 +550,5 @@ if __name__ == "__main__":
         image_res_sufficient_size=args.image_res_sufficient_size,
         bbox_padding_ratio=args.bbox_padding_ratio,
         n_chips_per_tree=args.n_chips_per_tree,
+        frac_of_max_size=args.frac_of_max_size,
     )
