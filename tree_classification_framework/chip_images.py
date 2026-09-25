@@ -4,6 +4,7 @@ import warnings
 import shutil
 from argparse import ArgumentParser, BooleanOptionalAction
 from multiprocessing import Pool
+from functools import partial
 from pathlib import Path
 
 import geopandas as gpd
@@ -124,10 +125,10 @@ def extract_shapes_from_mask(
 
 
 def save_chips(
-    image_path: str,
-    shapes_path: str,
+    image_path: str | Path,
+    shapes_path: str | Path,
+    output_folder: str | Path,
     IDs_to_include: pd.Series,
-    output_folder: str,
     IDs_to_labels: dict,
     mask_background: bool = MASK_BACKGROUND,
     mask_buffer_pixels: int = MASK_BUFFER_PIXELS,
@@ -137,14 +138,14 @@ def save_chips(
     """
     Use the vector representation of the rendered mask to chip and save one image per tree.
 
-    image_path (str):
+    image_path (str | Path):
         Path to an RGB image, which will be chipped
-    shapes_path (str):
+    shapes_path (str | Path):
         A path to a dataframe of shapes representing the rendered trees, containing the "IDs" attribute
+    output_folder (str | Path):
+        Where to write all chips.
     IDs_to_include (pd.Series):
         A series containing which IDs to produce renders for.
-    output_folder (str):
-        Where to write all chips.
     IDs_to_labels (dict):
         Mapping from integer values in the mask image to the filenames used for the output chips
     mask_background (bool, optional):
@@ -274,6 +275,9 @@ def subset_shapes(
     Returns:
         pd.DataFrame: Filtered and sampled subset of the input shapes.
     """
+    if n_chips_per_tree < 1:
+        raise ValueError(f"n_chips_per_tree must be positive but is {n_chips_per_tree}")
+
     # Compute the minimum size per ID, by selecting the 2*n_chips_per_tree th highest size
     min_size_per_ID = shapes.groupby("IDs").apply(
         lambda x: x.nlargest(2 * n_chips_per_tree, "min_dim").iloc[-1]["min_dim"],
@@ -324,14 +328,15 @@ def process_folder(
     frac_of_max_size: float = FRAC_OF_MAX_SIZE,
 ) -> None:
     """
-    Chip every image in a folder based on a folder of mask images with a parellel structure, writing
-    out the results in a parellel structure as the inputs. For more information, inspect the docstring
+    Chip every image in a folder based on a folder of mask images with a parallel structure, writing
+    out the results in a parallel structure as the inputs. For more information, inspect the docstring
     of `chip_images`.
     """
     images_folder = Path(images_folder)
     renders_folder = Path(renders_folder)
     output_dir = Path(output_dir)
 
+    # Check inputs
     image_files = sorted(images_folder.rglob(f"*{images_ext}"))
     render_files = sorted(renders_folder.rglob(f"*{renders_ext}"))
 
@@ -341,6 +346,7 @@ def process_folder(
     ]
 
     missing_images = set(renders_stems) - set(images_stems)
+    # This is always a failure since these views cannot be chipped
     if len(missing_images) > 0:
         raise ValueError(
             f"{len(missing_images)} renders do not have a corresponding images. The first 10 are {list(missing_images)[:10]}"
@@ -359,11 +365,11 @@ def process_folder(
         shutil.rmtree(output_dir)
 
     # Where the vector representation of the masks is stored
-    shapes_dir = tempfile.TemporaryDirectory()
+    shapes_temp_dir = tempfile.TemporaryDirectory()
 
     # Create paths within the temp dir to store each file
     output_files = [
-        Path(shapes_dir.name, f.relative_to(renders_folder)).with_suffix(".gpkg")
+        Path(shapes_temp_dir.name, f.relative_to(renders_folder)).with_suffix(".gpkg")
         for f in render_files
     ]
 
@@ -382,7 +388,7 @@ def process_folder(
     print("Determining a subset of chips to save")
     # Read only the attributes required to perform subsetting, since the geometry is memory intensive
     all_dimensions = []
-    for f in Path(shapes_dir.name).rglob("*.gpkg"):
+    for f in Path(shapes_temp_dir.name).rglob("*.gpkg"):
         gdf = gpd.read_file(f)
         if len(gdf) > 0:
             all_dimensions.append(gdf[["filename", "min_dim", "IDs"]])
@@ -390,8 +396,8 @@ def process_folder(
         raise ValueError(f"No trees were found in any of the masks in {renders_folder}")
     all_dimensions = pd.concat(all_dimensions, ignore_index=True)
 
-    # Apply the filtering proceedure to the two top-level folders independently, which correspond
-    # to the oblique and nadir missions
+    # Check how many top level folders there are, which is used to infer if this is a single or
+    # paired mission case
     top_level_folder = np.array(
         [
             str(Path(f).relative_to(renders_folder).parts[0])
@@ -410,6 +416,8 @@ def process_folder(
         )
     # Paired (oblique + nadir) missions
     elif len(unique_folders) == 2:
+        # Apply the filtering procedure to the two top-level folders independently, which correspond
+        # to the oblique and nadir missions
         all_dimensions_subsetted = []
         # Iterate over the folders corresponding to oblique and nadir, selected up to half of
         # n_chips_per_tree from each
@@ -437,41 +445,36 @@ def process_folder(
         IDs_to_labels = json.load(file_h)
         IDs_to_labels = {int(k): v for k, v in IDs_to_labels.items()}
 
-    # Build args for parallel save_chips calls
-    # TODO consider a partial function
+    # Create a partial function with all args that do not change across files
+    partial_save_chips = partial(
+        save_chips,
+        IDs_to_labels=IDs_to_labels,
+        mask_background=mask_background,
+        mask_buffer_pixels=mask_buffer_pixels,
+        background_value=background_value,
+        bbox_padding_ratio=bbox_padding_ratio,
+    )
+    # Build args for parallel save_chips calls, using the fact that the images, shapes, and output
+    # folders all have the same structure
     save_chips_args = [
         (
-            str(
-                Path(
-                    images_folder,
-                    Path(render_file).relative_to(renders_folder),
-                ).with_suffix(images_ext)
+            (images_folder / Path(render_file).relative_to(renders_folder)).with_suffix(
+                images_ext
             ),
-            str(
-                Path(
-                    shapes_dir.name,
-                    Path(render_file).relative_to(renders_folder),
-                ).with_suffix(".gpkg")
+            (
+                shapes_temp_dir.name / Path(render_file).relative_to(renders_folder)
+            ).with_suffix(".gpkg"),
+            (output_dir / Path(render_file).relative_to(renders_folder)).with_suffix(
+                ""
             ),
             dimensions_subset["IDs"],
-            str(
-                Path(
-                    output_dir,
-                    Path(render_file).relative_to(renders_folder).with_suffix(""),
-                )
-            ),
-            IDs_to_labels,
-            mask_background,
-            mask_buffer_pixels,
-            background_value,
-            bbox_padding_ratio,
         )
         for render_file, dimensions_subset in dimensions_by_file.items()
     ]
 
     # Save out the chips, parallelizing across files
     with Pool(n_workers) as p:
-        futures = [p.apply_async(save_chips, args) for args in save_chips_args]
+        futures = [p.apply_async(partial_save_chips, args) for args in save_chips_args]
         for f in tqdm(futures, desc="Saving out chips"):
             f.get()
 
