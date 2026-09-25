@@ -1,10 +1,10 @@
 import json
+import shutil
 import tempfile
 import warnings
-import shutil
 from argparse import ArgumentParser, BooleanOptionalAction
-from multiprocessing import Pool
 from functools import partial
+from multiprocessing import Pool
 from pathlib import Path
 
 import geopandas as gpd
