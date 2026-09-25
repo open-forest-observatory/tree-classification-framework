@@ -2,7 +2,6 @@ import json
 import tempfile
 import warnings
 from argparse import ArgumentParser, BooleanOptionalAction
-from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -82,8 +81,8 @@ def extract_shapes_from_mask(
     ]
     # Split into geometries and IDs and build a geodataframe
     geometry, ids = list(zip(*polys))
-    # Create a geodataframe. Note, this data is not geospatial, but this is the easiest way to work
-    # abstract working with vector data.
+    # Create a geodataframe. Note, this data is not geospatial, but this is the easiest way abstract
+    # working with vector data.
     shapes_gdf = gpd.GeoDataFrame({"geometry": geometry, "IDs": ids})
 
     # Merge by ID, forming multipolygons as needed
@@ -111,6 +110,7 @@ def save_chips(
     mask_background: bool = MASK_BACKGROUND,
     mask_buffer_pixels: int = MASK_BUFFER_PIXELS,
     background_value: tuple = BACKGROUND_VALUE,
+    bbox_padding_ratio: float = BBOX_PADDING_RATIO,
 ):
     """
     Use the vector representation of the rendered mask to chip and save one image per tree.
@@ -132,6 +132,8 @@ def save_chips(
         How many pixels to expand the geometry. Defaults to MASK_BUFFER_PIXELS.
     background_value (tuple, optional):
         The RGB color to use for the background if masking is applied. Defaults to BACKGROUND_VALUE.
+    bbox_padding_ratio: (float, optional):
+        The bounding box is this fraction larger on each edge than the mask that produces it. Defaults to BBOX_PADDING_RATIO.
 
     Raises:
         ValueError: If values in the mask image are not included in the IDs_to_labels keys, meaning they cannot be remapped
@@ -190,8 +192,8 @@ def save_chips(
     width = maxx - minx
     height = maxy - miny
 
-    pad_width = width * BBOX_PADDING_RATIO
-    pad_height = height * BBOX_PADDING_RATIO
+    pad_width = width * bbox_padding_ratio
+    pad_height = height * bbox_padding_ratio
 
     # padded coords for cropping
     # Don't inflate by the buffering amount if no masking is applied
@@ -314,7 +316,8 @@ def process_folder(
     mask_buffer_pixels: int = MASK_BUFFER_PIXELS,
     background_value: tuple = BACKGROUND_VALUE,
     image_res_min_size: int = IMAGE_RES_MIN_SIZE,
-    image_res_sufficient_size=IMAGE_RES_SUFFICIENT_SIZE,
+    image_res_sufficient_size: int = IMAGE_RES_SUFFICIENT_SIZE,
+    bbox_padding_ratio: float = BBOX_PADDING_RATIO,
     n_chips_per_tree=10,
 ) -> tuple:
     """
@@ -448,6 +451,7 @@ def process_folder(
             mask_background,
             mask_buffer_pixels,
             background_value,
+            bbox_padding_ratio,
         )
         for render_file, dimensions_subset in dimensions_by_file.items()
     ]
@@ -496,7 +500,13 @@ def parse_args():
         "--image-res-sufficient-size",
         type=int,
         default=IMAGE_RES_SUFFICIENT_SIZE,
-        help="If the height and width of a chip are greater than this value, ther will be a chance it will get saved. (default: %(default)s).",
+        help="If the height and width of a chip are greater than this value, there will be a chance it will get saved. (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--bbox-padding-ratio",
+        type=float,
+        default=BBOX_PADDING_RATIO,
+        help="The bounding box is this fraction larger on each edge than the mask that produces it. (default: %(default)s).",
     )
     parser.add_argument(
         "--n-chips-per-tree",
@@ -525,5 +535,6 @@ if __name__ == "__main__":
         background_value=tuple(args.background_value),
         image_res_min_size=args.image_res_min_size,
         image_res_sufficient_size=args.image_res_sufficient_size,
+        bbox_padding_ratio=args.bbox_padding_ratio,
         n_chips_per_tree=args.n_chips_per_tree,
     )
