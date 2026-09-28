@@ -10,7 +10,10 @@ requires-python = ">=3.12"
 dependencies = [
     "geopandas (>=1.1.4,<2.0.0)",
     "imageio (>=2.37.4,<3.0.0)",
-    "rasterio (>=1.5.1,<2.0.0)"
+    "rasterio (>=1.5.1,<2.0.0)",
+    "scipy (>=1.18.1,<2.0.0)",
+    "tqdm (>=4.70.1,<5.0.0)",
+    "pillow (>=12.3.0,<13.0.0)"
 ]
 
 
@@ -20,3 +23,8 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.isort]
 profile = "black"
+[dependency-groups]
+dev = [
+    "black (>=26.5.1,<27.0.0)",
+    "isort (>=9.0.1,<10.0.0)"
+]
