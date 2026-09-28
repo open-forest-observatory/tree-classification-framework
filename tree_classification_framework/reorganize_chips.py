@@ -4,14 +4,11 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 import argparse
+import warnings
 
 import geopandas as gpd
 import pandas as pd
-import numpy as np
 
-# Per-dataset folders each contain a "<dataset-id>_matched-trees.gpkg" and a "chips/" tree
-# of "<unique_ID>.png" chips (multiple views per tree, one per source image subfolder).
-GPKG_SUFFIX = "_matched-trees.gpkg"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
 ID_COLUMN = "unique_ID"
 
@@ -76,23 +73,32 @@ def link_or_copy(src, dst):
 
 
 def reorganize_single_dataset(
-    chips_folder: str | Path,
-    tree_metadata_path: str | Path,
+    chips_folder: Path,
+    tree_metadata_path: Path,
     dataset_name: str,
     training_attribute: str,
     class_counters: dict,
     skipped_unmapped: dict,
     reorganization_summary: list,
-    output_dir: str | Path,
+    output_dir: Path,
     class_name_remapping: dict | None,
     dead_tree_attribute: str,
     filter_dead_trees: bool,
 ):
     if not chips_folder.is_dir():
-        print(f"[{chips_folder}] does not exist; skipping")
-        return
-    # 1. Load the geopackage and remap the class attribute for each tree
+        raise ValueError(f"[{chips_folder}] does not exist")
+
+    # Load the geopackage and remap the class attribute for each tree
     tree_metadata = gpd.read_file(tree_metadata_path)
+
+    for required in (ID_COLUMN, training_attribute):
+        if required not in tree_metadata.columns:
+            raise ValueError(
+                f"[{dataset_name}] column '{required}' not found in {tree_metadata_path}; "
+                f"available columns: {list(tree_metadata.columns)}"
+            )
+    tree_metadata[ID_COLUMN] = tree_metadata[ID_COLUMN].astype(str)
+
     # Drop rows which are not predicted as live if requested
     if filter_dead_trees:
         n_total = len(tree_metadata)
@@ -103,21 +109,13 @@ def reorganize_single_dataset(
             )
         live_trees = tree_metadata[dead_tree_attribute] == "Live"
         dead_tree_IDs = tree_metadata.loc[~live_trees, ID_COLUMN].tolist()
-        # trees = trees[live_trees]
+        trees = trees[live_trees]
 
         print(
             f"Dropped {n_total - len(tree_metadata)} of {n_total} trees predicted as dead from {dataset_name}"
         )
     else:
         dead_tree_IDs = []
-
-    for required in (ID_COLUMN, training_attribute):
-        if required not in tree_metadata.columns:
-            raise ValueError(
-                f"[{dataset_name}] column '{required}' not found in {tree_metadata_path}; "
-                f"available columns: {list(tree_metadata.columns)}"
-            )
-    tree_metadata[ID_COLUMN] = tree_metadata[ID_COLUMN].astype(str)
 
     raw_by_id = dict(zip(tree_metadata[ID_COLUMN], tree_metadata[training_attribute]))
     class_by_id = {}
@@ -230,32 +228,61 @@ def main(
 
     # Load the definition of which dataset to assign to train and val
     train_val_split = pd.read_csv(
-        train_val_split_file, names=("dataset_id", "train_val"), skipinitialspace=True
+        train_val_split_file,
+        names=("dataset_id", "train_val"),
+        skipinitialspace=True,
+        dtype=str,
     )
 
-    # Once the preliminary checks have completed, delete the output dir if previously created
+    if not train_val_split.train_val.isin(["train", "val"]).all():
+        raise ValueError(
+            f"The train_val column should only have values of 'train' or 'val' but instead has {train_val_split.train_val.unique().tolist()}"
+        )
+
+    # Error if the same dataset appears multiple times within the same fold
+    if (
+        len(
+            duplicated_rows := train_val_split[train_val_split.duplicated(keep="first")]
+        )
+        > 0
+    ):
+        raise ValueError(
+            "The following dataset_IDs are listed more than once within the same fold: "
+            f"{list(duplicated_rows.itertuples(index=False, name=None))}"
+        )
+
+    # Delete the output directory if previously created
     if output_dir.is_dir():
         shutil.rmtree(output_dir)
 
+    train_datasets = train_val_split.query("train_val=='train'").dataset_id.to_list()
+    val_datasets = train_val_split.query("train_val=='val'").dataset_id.to_list()
+
+    if len(overlapping_IDs := set(train_datasets).intersection(set(val_datasets))) > 0:
+        # Note that this is a warning rather than an error because these datasets may be
+        # intentionally replicated, such as when testing the code or evaluating in-distribution
+        # performance.
+        warnings.warn(
+            f"The following dataset_IDs overlap between train and val: {list(overlapping_IDs)}"
+        )
+
     # Reorganize train and val datasets independently
-    for train_val in ("train", "val"):
-        fold_datasets = train_val_split.query(
-            "train_val==@train_val"
-        ).dataset_id.to_list()
+    for train_val, dataset_IDs in (("train", train_datasets), ("val", val_datasets)):
 
         # This saves information about the restructuring process which is used later for tree-level
         # metrics
         reorganization_summary = []
+        # Output dir
+        dataset_output_dir = output_dir / train_val
 
         # Count the number of chips written per class and the number per class that were skipped
         class_counters = defaultdict(int)
         skipped_unmapped = defaultdict(int)
 
         # Iterate over each dataset
-        for dataset_ID in fold_datasets:
+        for dataset_ID in dataset_IDs:
             dataset_chips_dir = chips_dir / dataset_ID
             tree_metadata_file = metadata_dir / f"{dataset_ID}.gpkg"
-            dataset_output_dir = output_dir / train_val / dataset_ID
 
             # Call per-folder reorganization
             reorganize_single_dataset(
@@ -287,7 +314,7 @@ def main(
 
         if total == 0:
             raise ValueError(
-                "No chips were written; check ATTRIBUTE_TO_TRAIN_ON and the remapping file"
+                "No chips were written; check attribute_to_train_on and the remapping file"
             )
 
         # Save out the summary file
@@ -295,7 +322,7 @@ def main(
         reorganization_summary_path = Path(
             output_dir, f"{train_val}_reorganization_summary.csv"
         )
-        reorganization_summary.to_csv(reorganization_summary_path)
+        reorganization_summary.to_csv(reorganization_summary_path, index=False)
 
     # Ensure matching train and val folders
     train_class_names = {p.name for p in (output_dir / "train").glob("*")}
