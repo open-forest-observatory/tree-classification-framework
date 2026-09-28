@@ -21,19 +21,27 @@ def parse_args():
         description="Reorganize chips into a train/val folder structure for classification"
     )
     parser.add_argument(
-        "--input-dir",
+        "chips_dir",
         type=Path,
-        required=True,
-        help="Input directory containing train/ and val/ subfolders",
+        help="Input chips folder. This should be organized by dataset_ID at the top level, and then each folder within it should be organized in the same structure as the original photogrammetry imagery",
     )
     parser.add_argument(
-        "--output-dir",
+        "metadata_dir",
         type=Path,
-        required=True,
-        help="Output directory to write reorganized chips to",
+        help="Input tree-level metadata folder. There should be one file per dataset and each file should be named based on the dataset_ID with the `.gpkg` extension",
     )
     parser.add_argument(
-        "--remap-file",
+        "train_val_split_file",
+        type=Path,
+        help="Path to a .csv defining the train/val split. The file should contain two columns without headers. The first column should be the dataset_ID and the second is 'train' or 'val'",
+    )
+    parser.add_argument(
+        "output_dir",
+        type=Path,
+        help="Output directory to write reorganized chips to. The top level folders will be 'train' or 'val' and then each will contain subfolders for each class.",
+    )
+    parser.add_argument(
+        "--class-remap-file",
         type=Path,
         default=None,
         help="JSON file mapping original attribute values to final class names",
@@ -41,13 +49,13 @@ def parse_args():
     parser.add_argument(
         "--attribute-to-train-on",
         type=str,
-        required=True,
+        default="species_code",
         help="Column name in the geopackage to use as the class label",
     )
     parser.add_argument(
         "--filter-dead-trees",
         action="store_true",
-        help="If set, drop trees predicted as dead based on the dead-trees-attribute column",
+        help="If set, drop trees predicted as dead based on the --dead-trees-attribute column",
     )
     parser.add_argument(
         "--dead-trees-attribute",
@@ -67,18 +75,120 @@ def link_or_copy(src, dst):
         shutil.copy2(src, dst)
 
 
+def reorganize_single_dataset(
+    chips_folder: str | Path,
+    tree_metadata_path: str | Path,
+    dataset_name: str,
+    training_attribute: str,
+    identity_mapping: bool,
+    class_counters: dict,
+    skipped_unmapped: dict,
+    reorganization_summary: list,
+    output_dir: str | Path,
+    class_name_remapping: dict | None,
+    dead_tree_attribute: str,
+    filter_dead_trees: bool,
+):
+    if not chips_folder.is_dir():
+        print(f"[{chips_folder}] does not exist; skipping")
+        return
+    # 1. Load the geopackage and remap the class attribute for each tree
+    tree_metadata = gpd.read_file(tree_metadata_path)
+    # Drop rows which are not predicted as live if requested
+    if filter_dead_trees:
+        n_total = len(tree_metadata)
+        if dead_tree_attribute not in tree_metadata.columns:
+            raise ValueError(
+                f"[{dataset_name}] column '{dead_tree_attribute}' not found in {tree_metadata_path}; "
+                f"available columns: {list(tree_metadata.columns)}"
+            )
+        live_trees = tree_metadata[dead_tree_attribute] == "Live"
+        dead_tree_IDs = tree_metadata.loc[~live_trees, ID_COLUMN].tolist()
+        # trees = trees[live_trees]
+
+        print(
+            f"Dropped {n_total - len(tree_metadata)} of {n_total} trees predicted as dead from {dataset_name}"
+        )
+    else:
+        dead_tree_IDs = []
+
+    for required in (ID_COLUMN, training_attribute):
+        if required not in tree_metadata.columns:
+            raise ValueError(
+                f"[{dataset_name}] column '{required}' not found in {tree_metadata_path}; "
+                f"available columns: {list(tree_metadata.columns)}"
+            )
+    tree_metadata[ID_COLUMN] = tree_metadata[ID_COLUMN].astype(str)
+
+    raw_by_id = dict(zip(tree_metadata[ID_COLUMN], tree_metadata[training_attribute]))
+    class_by_id = {}
+    for unique_id, raw_class in raw_by_id.items():
+        if pd.isna(raw_class):
+            continue
+        raw_class = str(raw_class)
+        if identity_mapping:
+            class_by_id[unique_id] = raw_class
+        elif raw_class in class_name_remapping:
+            class_by_id[unique_id] = class_name_remapping[raw_class]
+        # else: attribute value absent from the remapping file -> drop this tree
+
+    # 2. Hardlink every chip to the output folder for its remapped class
+    n_linked = 0
+    for chip_path in sorted(chips_folder.rglob("*")):
+        if not chip_path.is_file() or chip_path.suffix.lower() not in IMAGE_EXTS:
+            continue
+        unique_id = chip_path.stem
+        output_class = class_by_id.get(unique_id)
+        if output_class is None:
+            if unique_id in raw_by_id:
+                skipped_unmapped[str(raw_by_id[unique_id])] += 1
+            elif unique_id in dead_tree_IDs:
+                # This tree was dropped because it was predicted as dead
+                pass
+            else:
+                raise ValueError(
+                    f"Unique ID {unique_id} not found in {tree_metadata_path}"
+                )
+            continue
+
+        class_dir = output_dir / output_class
+        dst = (
+            class_dir / f"{class_counters[output_class]:06d}{chip_path.suffix.lower()}"
+        )
+        link_or_copy(chip_path, dst)
+        class_counters[output_class] += 1
+        n_linked += 1
+
+        # Add an entry to the list which tracks the reorganization
+        reorganization_summary.append(
+            {
+                "image_path": str(dst),
+                "class": output_class,
+                "tree_id": unique_id,
+                "dataset_id": dataset_name,
+            }
+        )
+
+    print(
+        f"[{dataset_name}] linked {n_linked} chips "
+        f"from {len(class_by_id)} matched trees"
+    )
+
+
 def main(
-    input_dir,
+    chips_dir,
+    metadata_dir,
+    train_val_split_file,
     output_dir,
-    remap_file,
-    attribute,
+    class_remap_file,
+    attribute_to_train_on,
     filter_dead_trees,
     dead_trees_attribute,
 ):
     # --- Load the class remapping (original attribute value -> final class name) ---
     # With no file provided, fall back to an identity mapping that keeps every observed class.
-    if remap_file:
-        with open(remap_file, "r") as f:
+    if class_remap_file:
+        with open(class_remap_file, "r") as f:
             class_remapping = {str(k): str(v) for k, v in json.load(f).items()}
         identity_mapping = False
         print(
@@ -90,127 +200,44 @@ def main(
         identity_mapping = True
         print("No class remapping file provided; keeping every class unchanged")
 
-    if not (input_dir / "train").is_dir() or not (input_dir / "val").is_dir():
-        raise ValueError(
-            f"Both train and val subfolders of {input_dir} must be present"
-        )
+    # Load the definition of which dataset to assign to train and val
+    train_val_split = pd.read_csv(
+        train_val_split_file, names=("dataset_id", "train_val"), skipinitialspace=True
+    )
+
+    if output_dir.is_dir():
+        shutil.rmtree(output_dir)
 
     for train_val in ("train", "val"):
+        fold_datasets = train_val_split.query(
+            "train_val==@train_val"
+        ).dataset_id.to_list()
+
         # This saves information about the restructuring
         reorganization_summary = []
-
-        # Create the subfolder path that holds all datasets for either train or val
-        input_dir_train_val = input_dir / train_val
-        # --- List the per-dataset folders (those holding a *_matched-trees.gpkg) ---
-        dataset_dirs = sorted(
-            d
-            for d in input_dir_train_val.iterdir()
-            if d.is_dir() and any(d.glob(f"*{GPKG_SUFFIX}"))
-        )
-        if not dataset_dirs:
-            raise ValueError(
-                f"No dataset folders containing a *{GPKG_SUFFIX} file were found under {input_dir_train_val}"
-            )
-        print(
-            f"Found {len(dataset_dirs)} dataset folder(s): {[d.name for d in dataset_dirs]}"
-        )
 
         # --- Per-class counter: how many chips have been written for each class so far ---
         class_counters = defaultdict(int)
         skipped_unmapped = defaultdict(int)  # raw attribute value -> chips skipped
-        chips_without_tree = 0  # chip whose unique_ID is absent from the geopackage
+        for dataset_ID in fold_datasets:
+            dataset_chips_dir = chips_dir / dataset_ID
+            tree_metadata_file = metadata_dir / f"{dataset_ID}.gpkg"
+            dataset_output_dir = output_dir / train_val / dataset_ID
 
-        for dataset_dir in dataset_dirs:
-            gpkg_path = sorted(dataset_dir.glob(f"*{GPKG_SUFFIX}"))[0]
-            chips_dir = dataset_dir / "chips"
-            if not chips_dir.is_dir():
-                print(f"[{dataset_dir.name}] no chips/ directory; skipping")
-                continue
-
-            # 1. Load the geopackage and remap the class attribute for each tree
-            trees = gpd.read_file(gpkg_path)
-            # Drop rows which are not predicted as live if requested
-            if filter_dead_trees:
-                n_total = len(trees)
-                if dead_trees_attribute not in trees.columns:
-                    raise ValueError(
-                        f"[{dataset_dir.name}] column '{dead_trees_attribute}' not found in {gpkg_path.name}; "
-                        f"available columns: {list(trees.columns)}"
-                    )
-                live_trees = trees[dead_trees_attribute] == "Live"
-                dead_tree_IDs = trees.loc[~live_trees, ID_COLUMN].tolist()
-                trees = trees[live_trees]
-
-                print(
-                    f"Dropped {n_total - len(trees)} of {n_total} trees predicted as dead from {dataset_dir.name}"
-                )
-            else:
-                dead_tree_IDs = []
-
-            for required in (ID_COLUMN, attribute):
-                if required not in trees.columns:
-                    raise ValueError(
-                        f"[{dataset_dir.name}] column '{required}' not found in {gpkg_path.name}; "
-                        f"available columns: {list(trees.columns)}"
-                    )
-            trees[ID_COLUMN] = trees[ID_COLUMN].astype(str)
-
-            raw_by_id = dict(zip(trees[ID_COLUMN], trees[attribute]))
-            class_by_id = {}
-            for unique_id, raw_class in raw_by_id.items():
-                if pd.isna(raw_class):
-                    continue
-                raw_class = str(raw_class)
-                if identity_mapping:
-                    class_by_id[unique_id] = raw_class
-                elif raw_class in class_remapping:
-                    class_by_id[unique_id] = class_remapping[raw_class]
-                # else: attribute value absent from the remapping file -> drop this tree
-
-            # 2. Hardlink every chip to the output folder for its remapped class
-            n_linked = 0
-            for chip_path in sorted(chips_dir.rglob("*")):
-                if (
-                    not chip_path.is_file()
-                    or chip_path.suffix.lower() not in IMAGE_EXTS
-                ):
-                    continue
-                unique_id = chip_path.stem
-                output_class = class_by_id.get(unique_id)
-                if output_class is None:
-                    if unique_id in raw_by_id:
-                        skipped_unmapped[str(raw_by_id[unique_id])] += 1
-                    elif unique_id in dead_tree_IDs:
-                        # This tree was dropped because it was predicted as dead
-                        pass
-                    else:
-                        raise ValueError(
-                            f"Unique ID {unique_id} not found in {gpkg_path.name}"
-                        )
-                    continue
-
-                class_dir = output_dir / train_val / output_class
-                dst = (
-                    class_dir
-                    / f"{class_counters[output_class]:06d}{chip_path.suffix.lower()}"
-                )
-                link_or_copy(chip_path, dst)
-                class_counters[output_class] += 1
-                n_linked += 1
-
-                # Add an entry to the list which tracks the reorganization
-                reorganization_summary.append(
-                    {
-                        "image_path": str(dst),
-                        "class": output_class,
-                        "tree_id": unique_id,
-                        "dataset_id": dataset_dir.name,
-                    }
-                )
-
-            print(
-                f"[{dataset_dir.name}] linked {n_linked} chips "
-                f"from {len(class_by_id)} matched trees"
+            # Call per-folder reorganization
+            reorganize_single_dataset(
+                chips_folder=dataset_chips_dir,
+                tree_metadata_path=tree_metadata_file,
+                dataset_name=dataset_ID,
+                training_attribute=attribute_to_train_on,
+                identity_mapping=identity_mapping,
+                class_counters=class_counters,
+                skipped_unmapped=skipped_unmapped,
+                reorganization_summary=reorganization_summary,
+                output_dir=dataset_output_dir,
+                class_name_remapping=class_remapping,
+                dead_tree_attribute=dead_trees_attribute,
+                filter_dead_trees=filter_dead_trees,
             )
 
         # --- Summary ---
@@ -225,10 +252,6 @@ def main(
             )
             for raw, count in sorted(skipped_unmapped.items(), key=lambda kv: -kv[1]):
                 print(f"  {raw!r}: {count}")
-        if chips_without_tree:
-            print(
-                f"Chips skipped (unique_ID not present in the geopackage): {chips_without_tree}"
-            )
 
         if total == 0:
             raise ValueError(
