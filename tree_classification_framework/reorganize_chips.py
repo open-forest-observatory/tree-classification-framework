@@ -80,7 +80,6 @@ def reorganize_single_dataset(
     tree_metadata_path: str | Path,
     dataset_name: str,
     training_attribute: str,
-    identity_mapping: bool,
     class_counters: dict,
     skipped_unmapped: dict,
     reorganization_summary: list,
@@ -126,7 +125,7 @@ def reorganize_single_dataset(
         if pd.isna(raw_class):
             continue
         raw_class = str(raw_class)
-        if identity_mapping:
+        if class_name_remapping is None:
             class_by_id[unique_id] = raw_class
         elif raw_class in class_name_remapping:
             class_by_id[unique_id] = class_name_remapping[raw_class]
@@ -176,28 +175,57 @@ def reorganize_single_dataset(
 
 
 def main(
-    chips_dir,
-    metadata_dir,
-    train_val_split_file,
-    output_dir,
-    class_remap_file,
-    attribute_to_train_on,
-    filter_dead_trees,
-    dead_trees_attribute,
+    chips_dir: Path,
+    metadata_dir: Path,
+    train_val_split_file: Path,
+    output_dir: Path,
+    class_remap_file: Path | None = None,
+    attribute_to_train_on: str = "species_code",
+    filter_dead_trees: bool = False,
+    dead_trees_attribute: str = "predicted_health_status",
 ):
-    # --- Load the class remapping (original attribute value -> final class name) ---
-    # With no file provided, fall back to an identity mapping that keeps every observed class.
+    """
+    Reorganize chips into a train/val folder structure for classification.
+
+    Args:
+        chips_dir (Path):
+            Input chips folder. This should be organized by dataset_ID at the top level, and then
+            each folder within it should be organized in the same structure as the original
+            photogrammetry imagery.
+        metadata_dir (Path):
+            Input tree-level metadata folder. There should be one file per dataset and each file
+            should be named based on the dataset_ID with the `.gpkg` extension.
+        train_val_split_file (Path):
+            Path to a .csv defining the train/val split. The file should contain two columns
+            without headers. The first column should be the dataset_ID and the second is 'train'
+            or 'val'.
+        output_dir (Path):
+            Output directory to write reorganized chips to. The top level folders will be 'train'
+            or 'val' and then each will contain subfolders for each class. Any existing contents
+            are deleted.
+        class_remap_file (Path | None, optional):
+            JSON file mapping original attribute values to final class names. If None, every
+            class is kept unchanged. Defaults to None.
+        attribute_to_train_on (str, optional):
+            Column name in the geopackage to use as the class label. Defaults to "species_code".
+        filter_dead_trees (bool, optional):
+            If set, drop trees predicted as dead based on the `dead_trees_attribute` column.
+            Defaults to False.
+        dead_trees_attribute (str, optional):
+            Column name in the geopackage indicating whether a tree is live or dead. Defaults to
+            "predicted_health_status".
+    """
+    # Load the class remapping (original attribute value -> final class name). With no file
+    # provided, keep all classes unchanged
     if class_remap_file:
         with open(class_remap_file, "r") as f:
             class_remapping = {str(k): str(v) for k, v in json.load(f).items()}
-        identity_mapping = False
         print(
             f"Loaded class remapping: {len(class_remapping)} attribute values -> "
             f"{len(set(class_remapping.values()))} output classes"
         )
     else:
-        class_remapping = {}
-        identity_mapping = True
+        class_remapping = None
         print("No class remapping file provided; keeping every class unchanged")
 
     # Load the definition of which dataset to assign to train and val
@@ -205,20 +233,25 @@ def main(
         train_val_split_file, names=("dataset_id", "train_val"), skipinitialspace=True
     )
 
+    # Once the preliminary checks have completed, delete the output dir if previously created
     if output_dir.is_dir():
         shutil.rmtree(output_dir)
 
+    # Reorganize train and val datasets independently
     for train_val in ("train", "val"):
         fold_datasets = train_val_split.query(
             "train_val==@train_val"
         ).dataset_id.to_list()
 
-        # This saves information about the restructuring
+        # This saves information about the restructuring process which is used later for tree-level
+        # metrics
         reorganization_summary = []
 
-        # --- Per-class counter: how many chips have been written for each class so far ---
+        # Count the number of chips written per class and the number per class that were skipped
         class_counters = defaultdict(int)
-        skipped_unmapped = defaultdict(int)  # raw attribute value -> chips skipped
+        skipped_unmapped = defaultdict(int)
+
+        # Iterate over each dataset
         for dataset_ID in fold_datasets:
             dataset_chips_dir = chips_dir / dataset_ID
             tree_metadata_file = metadata_dir / f"{dataset_ID}.gpkg"
@@ -230,7 +263,6 @@ def main(
                 tree_metadata_path=tree_metadata_file,
                 dataset_name=dataset_ID,
                 training_attribute=attribute_to_train_on,
-                identity_mapping=identity_mapping,
                 class_counters=class_counters,
                 skipped_unmapped=skipped_unmapped,
                 reorganization_summary=reorganization_summary,
@@ -240,7 +272,7 @@ def main(
                 filter_dead_trees=filter_dead_trees,
             )
 
-        # --- Summary ---
+        # Print summary
         total = sum(class_counters.values())
         print(f"\n=== Reorganization summary ({train_val})===")
         for output_class in sorted(class_counters):
