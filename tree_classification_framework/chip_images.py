@@ -245,8 +245,9 @@ def save_chips(
                 dtype="uint8",
             ).astype(bool)
 
-            bg = np.array(background_value, dtype=crop.dtype)
-            crop[mask] = bg
+            # Perform background masking
+            background_mask = np.array(background_value, dtype=crop.dtype)
+            crop[mask] = background_mask
 
         # Create the output path
         output_path = Path(output_folder, f"{row.IDs}.png")
@@ -278,7 +279,7 @@ def subset_shapes(
     if n_chips_per_tree < 1:
         raise ValueError(f"n_chips_per_tree must be positive but is {n_chips_per_tree}")
 
-    # Compute the minimum size per ID, by selecting the 2*n_chips_per_tree th highest size
+    # Compute the minimum size per ID, by selecting the 2*n_chips_per_tree the highest size
     min_size_per_ID = shapes.groupby("IDs").apply(
         lambda x: x.nlargest(2 * n_chips_per_tree, "min_dim").iloc[-1]["min_dim"],
         include_groups=False,
@@ -368,7 +369,7 @@ def process_folder(
     shapes_temp_dir = tempfile.TemporaryDirectory()
 
     # Create paths within the temp dir to store each file
-    output_files = [
+    shapes_files = [
         Path(shapes_temp_dir.name, f.relative_to(renders_folder)).with_suffix(".gpkg")
         for f in render_files
     ]
@@ -380,7 +381,7 @@ def process_folder(
                 extract_shapes_from_mask,
                 (render_file, output_file, RENDER_NULL_ID, frac_of_max_size),
             )
-            for render_file, output_file in zip(render_files, output_files)
+            for render_file, output_file in zip(render_files, shapes_files)
         ]
         for f in tqdm(futures, desc="Extracting shapes from masks"):
             f.get()
@@ -398,6 +399,9 @@ def process_folder(
 
     # Check how many top level folders there are, which is used to infer if this is a single or
     # paired mission case
+    # TODO consider dropping support for paired missions since this is specific to the OFO logic.
+    # Instead, the calling script would be forced to know/determine whether the mission is paired
+    # and call this functionality once on each constituent mission.
     top_level_folder = np.array(
         [
             str(Path(f).relative_to(renders_folder).parts[0])
@@ -500,7 +504,7 @@ def parse_args():
         "--n-workers",
         type=int,
         default=1,
-        help="This process is highly parallelizable so you can run it multiprocessed",
+        help="This process is highly parallelizable so you can run it with multiprocessing",
     )
     parser.add_argument(
         "--ensure-all-images-have-renders",
