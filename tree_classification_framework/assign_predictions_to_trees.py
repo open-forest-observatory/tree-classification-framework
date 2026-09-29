@@ -19,7 +19,6 @@ def parse_args():
         help="Name of the attribute that the predicted classes will be written to in the output files.",
         type=str,
     )
-
     parser.add_argument(
         "input_tree_crowns_file", type=Path, help="Path to the detected crowns"
     )
@@ -123,10 +122,19 @@ def assign_predictions_to_trees(
             detected_tree_crowns["treetop_unique_ID"].tolist(),
         )
     }
-    # Remap the unique_ID attribute to represent tree top IDs rather than crown IDs
-    prediction_per_tree.unique_ID = prediction_per_tree.unique_ID.replace(
+    # Remap the unique_ID attribute to represent tree top IDs rather than crown IDs. Use map rather
+    # than replace so that crown IDs without a corresponding crown become NaN instead of being left
+    # as-is, where they could spuriously match an unrelated tree top ID.
+    prediction_per_tree.unique_ID = prediction_per_tree.unique_ID.map(
         crown_to_tree_top_mapping
     )
+    # Drop predictions that could not be mapped to a tree top
+    unmapped = prediction_per_tree.unique_ID.isna()
+    if unmapped.any():
+        raise ValueError(
+            f"{unmapped.sum()} tree predictions did not match any crown and will not be assigned to tree tops"
+        )
+
     # Merge the predictions into the tree tops
     detected_tree_tops = detected_tree_tops.merge(
         prediction_per_tree, on="unique_ID", how="left"
