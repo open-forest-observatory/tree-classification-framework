@@ -11,6 +11,7 @@ import pandas as pd
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
 ID_COLUMN = "unique_ID"
+LIVE_DEAD_ATTRIBUTE = "live_dead_prediction"
 
 
 def parse_args():
@@ -55,10 +56,10 @@ def parse_args():
         help="If set, drop trees predicted as dead based on the --dead-trees-attribute column",
     )
     parser.add_argument(
-        "--dead-trees-attribute",
+        "--live-dead-attribute",
         type=str,
-        default="predicted_health_status",
-        help="Column name in the geopackage indicating whether a tree is live or dead (default: predicted_health_status)",
+        default=LIVE_DEAD_ATTRIBUTE,
+        help="Column name in the geopackage indicating whether a tree is live or dead (default: live_dead_predicted)",
     )
     return parser.parse_args()
 
@@ -76,99 +77,131 @@ def reorganize_single_dataset(
     chips_folder: Path,
     tree_metadata_path: Path,
     dataset_name: str,
+    output_dir: Path,
     training_attribute: str,
     class_counters: dict,
     skipped_unmapped: dict,
     reorganization_summary: list,
-    output_dir: Path,
     class_name_remapping: dict | None,
-    dead_tree_attribute: str,
+    live_dead_attribute: str,
     filter_dead_trees: bool,
 ):
+    """
+    Restructure the chips from a single dataset to be placed in per-class folders and have
+    sequential IDs
+
+    Args:
+        chips_folder (Path): Path to one dataset worth of chips
+        tree_metadata_path (Path): Path to the per-tree metadata
+        dataset_name (str): The name of the dataset, often the drone-plot pair
+        output_dir (Path): Where to write the class-level reorganized chips
+        training_attribute (str): What attribute from the metadata to reorganize based on
+        class_counters (dict): Counters for number of remapped chips per class
+        skipped_unmapped (dict): Counters for number of chips skipped because they weren't in the list of included classes
+        reorganization_summary (list): A running list tracking the reorganization to use downstream for tree-level metrics
+        class_name_remapping (dict | None): A dictionary mapping from original new new class names. If None, all classes will be kept.
+        live_dead_attribute (str): What attribute determines if a tree is live or dead
+        filter_dead_trees (bool): Should chips from dead trees be skipped in the linking process
+
+    Raises:
+        ValueError: If the input chip folder does not exist
+        ValueError: If the required training attribute column is not present in the metadata file
+        ValueError: If the required live/dead attribute is not present in the metadata file
+        ValueError: If the unique ID for a chip is not included in the metadata file
+    """
     if not chips_folder.is_dir():
         raise ValueError(f"[{chips_folder}] does not exist")
 
     # Load the geopackage and remap the class attribute for each tree
     tree_metadata = gpd.read_file(tree_metadata_path)
 
-    for required in (ID_COLUMN, training_attribute):
+    for required in (
+        (ID_COLUMN, training_attribute) + (live_dead_attribute,)
+        if filter_dead_trees
+        else ()
+    ):
         if required not in tree_metadata.columns:
             raise ValueError(
                 f"[{dataset_name}] column '{required}' not found in {tree_metadata_path}; "
                 f"available columns: {list(tree_metadata.columns)}"
             )
     tree_metadata[ID_COLUMN] = tree_metadata[ID_COLUMN].astype(str)
+    # Drop any rows with critical elements that are na
+    tree_metadata.dropna(axis=0, subset=[ID_COLUMN, training_attribute])
 
     # Drop rows which are not predicted as live if requested
     if filter_dead_trees:
-        n_total = len(tree_metadata)
-        if dead_tree_attribute not in tree_metadata.columns:
-            raise ValueError(
-                f"[{dataset_name}] column '{dead_tree_attribute}' not found in {tree_metadata_path}; "
-                f"available columns: {list(tree_metadata.columns)}"
-            )
-        live_trees = tree_metadata[dead_tree_attribute] == "Live"
+        # Note that anything other than the literal 'Live' is dropped
+        live_trees = tree_metadata[live_dead_attribute] == "Live"
         dead_tree_IDs = tree_metadata.loc[~live_trees, ID_COLUMN].tolist()
-        trees = trees[live_trees]
-
+        tree_metadata = tree_metadata[live_trees]
         print(
-            f"Dropped {n_total - len(tree_metadata)} of {n_total} trees predicted as dead from {dataset_name}"
+            f"Dropped {(~live_trees).sum()} of {len(live_trees)} trees predicted as dead from {dataset_name}"
         )
     else:
         dead_tree_IDs = []
 
-    raw_by_id = dict(zip(tree_metadata[ID_COLUMN], tree_metadata[training_attribute]))
-    class_by_id = {}
-    for unique_id, raw_class in raw_by_id.items():
-        if pd.isna(raw_class):
-            continue
-        raw_class = str(raw_class)
-        if class_name_remapping is None:
-            class_by_id[unique_id] = raw_class
-        elif raw_class in class_name_remapping:
-            class_by_id[unique_id] = class_name_remapping[raw_class]
-        # else: attribute value absent from the remapping file -> drop this tree
+    id_to_attribute = dict(
+        zip(tree_metadata[ID_COLUMN], tree_metadata[training_attribute])
+    )
 
-    # 2. Hardlink every chip to the output folder for its remapped class
-    n_linked = 0
-    for chip_path in sorted(chips_folder.rglob("*")):
-        if not chip_path.is_file() or chip_path.suffix.lower() not in IMAGE_EXTS:
-            continue
+    if class_name_remapping is None:
+        # Keep this the same
+        id_to_class = id_to_attribute
+    else:
+        # Create a mapping which composes first mapping from id to attribute then attribute to class
+        # ids who's attributes do not correspond to a key in class_name_remapping are not included
+        # in the composed mapping
+        id_to_class = {
+            id: class_name_remapping[attribute]
+            for id, attribute in id_to_attribute.items()
+            if attribute in class_name_remapping
+        }
+
+    # List all files
+    chip_paths = [
+        chip_path
+        for chip_path in chips_folder.rglob("*")
+        if (chip_path.is_file() and chip_path.suffix.lower() in IMAGE_EXTS)
+    ]
+
+    # Hardlink/copy every chip to the output folder for its remapped class
+    for chip_path in chip_paths:
         unique_id = chip_path.stem
-        output_class = class_by_id.get(unique_id)
-        if output_class is None:
-            if unique_id in raw_by_id:
-                skipped_unmapped[str(raw_by_id[unique_id])] += 1
-            elif unique_id in dead_tree_IDs:
-                # This tree was dropped because it was predicted as dead
-                pass
-            else:
+        output_class = id_to_class.get(unique_id)
+
+        if output_class is not None:
+            reorganized_chip_path = (
+                output_dir
+                / output_class
+                / f"{class_counters[output_class]:06d}{chip_path.suffix.lower()}"
+            )
+            link_or_copy(chip_path, reorganized_chip_path)
+            class_counters[output_class] += 1
+
+            # Add an entry to the list which tracks the reorganization
+            reorganization_summary.append(
+                {
+                    "image_path": str(reorganized_chip_path),
+                    "class": output_class,
+                    "tree_id": unique_id,
+                    "dataset_id": dataset_name,
+                }
+            )
+        else:
+            # Logging and error checking for un-matched entries
+            if unique_id in id_to_attribute:
+                # Increment count of skipped classes
+                skipped_unmapped[str(id_to_attribute[unique_id])] += 1
+            if not unique_id in dead_tree_IDs:
+                # The only reason a id should not be included in the mapping is if the tree was
+                # removed because it was predicted as dead and therefore dropped.
                 raise ValueError(
                     f"Unique ID {unique_id} not found in {tree_metadata_path}"
                 )
-            continue
-
-        class_dir = output_dir / output_class
-        dst = (
-            class_dir / f"{class_counters[output_class]:06d}{chip_path.suffix.lower()}"
-        )
-        link_or_copy(chip_path, dst)
-        class_counters[output_class] += 1
-        n_linked += 1
-
-        # Add an entry to the list which tracks the reorganization
-        reorganization_summary.append(
-            {
-                "image_path": str(dst),
-                "class": output_class,
-                "tree_id": unique_id,
-                "dataset_id": dataset_name,
-            }
-        )
-
     print(
-        f"[{dataset_name}] linked {n_linked} chips "
-        f"from {len(class_by_id)} matched trees"
+        f"[{dataset_name}] linked {sum(class_counters.values())} chips "
+        f"from {len(id_to_class)} matched trees"
     )
 
 
@@ -180,7 +213,7 @@ def main(
     class_remap_file: Path | None = None,
     attribute_to_train_on: str = "species_code",
     filter_dead_trees: bool = False,
-    dead_trees_attribute: str = "predicted_health_status",
+    live_dead_attribute: str = "live_dead_prediction",
 ):
     """
     Reorganize chips into a train/val folder structure for classification.
@@ -209,7 +242,7 @@ def main(
         filter_dead_trees (bool, optional):
             If set, drop trees predicted as dead based on the `dead_trees_attribute` column.
             Defaults to False.
-        dead_trees_attribute (str, optional):
+        live_dead_attribute (str, optional):
             Column name in the geopackage indicating whether a tree is live or dead. Defaults to
             "predicted_health_status".
     """
@@ -289,13 +322,13 @@ def main(
                 chips_folder=dataset_chips_dir,
                 tree_metadata_path=tree_metadata_file,
                 dataset_name=dataset_ID,
+                output_dir=dataset_output_dir,
                 training_attribute=attribute_to_train_on,
                 class_counters=class_counters,
                 skipped_unmapped=skipped_unmapped,
                 reorganization_summary=reorganization_summary,
-                output_dir=dataset_output_dir,
                 class_name_remapping=class_remapping,
-                dead_tree_attribute=dead_trees_attribute,
+                live_dead_attribute=live_dead_attribute,
                 filter_dead_trees=filter_dead_trees,
             )
 
