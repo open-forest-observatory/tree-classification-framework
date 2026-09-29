@@ -16,7 +16,7 @@ LIVE_DEAD_ATTRIBUTE = "live_dead_prediction"
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Reorganize chips into a train/val folder structure for classification"
+        description="Reorganize chips into a train/val folder structure for classification. Chips begin structured according to the original folder of images used in photogrammetry and are remapped to a flat folder for each class within the train/val split."
     )
     parser.add_argument(
         "chips_dir",
@@ -65,7 +65,7 @@ def parse_args():
 
 
 def link_or_copy(src, dst):
-    """Hardlink src -> dst, falling back to a copy if they are on different filesystems."""
+    """Hardlink src -> dst, falling back to a copy if they are on different filesystems or this is not supported."""
     dst.parent.mkdir(exist_ok=True, parents=True)
     try:
         os.link(src, dst)
@@ -99,15 +99,16 @@ def reorganize_single_dataset(
         class_counters (dict): Counters for number of remapped chips per class
         unmapped_classes (dict): Counters for number of chips skipped because they weren't in the list of included classes
         reorganization_summary (list): A running list tracking the reorganization to use downstream for tree-level metrics
-        class_name_remapping (dict | None): A dictionary mapping from original new new class names. If None, all classes will be kept.
+        class_name_remapping (dict | None): A dictionary mapping from original to new class names. If None, all classes will be kept.
         live_dead_attribute (str): What attribute determines if a tree is live or dead
         filter_dead_trees (bool): Should chips from dead trees be skipped in the linking process
 
     Raises:
-        ValueError: If the input chip folder does not exist
-        ValueError: If the required training attribute column is not present in the metadata file
-        ValueError: If the required live/dead attribute is not present in the metadata file
-        ValueError: If the unique ID for a chip is not included in the metadata file
+        ValueError:
+            If the input chip folder does not exist
+        ValueError:
+            If the required training attribute column, live/dead attribute, or the unique ID for a
+            chip is not included in the metadata file
     """
     if not chips_folder.is_dir():
         raise ValueError(f"[{chips_folder}] does not exist")
@@ -115,6 +116,7 @@ def reorganize_single_dataset(
     # Load the geopackage and remap the class attribute for each tree
     tree_metadata = gpd.read_file(tree_metadata_path)
 
+    # Check columns
     for required in (
         (ID_COLUMN, training_attribute) + (live_dead_attribute,)
         if filter_dead_trees
@@ -141,16 +143,17 @@ def reorganize_single_dataset(
     else:
         dead_tree_IDs = set()
 
+    # Create the mapping from an individual tree's ID to the attribute listed in the metadata file
     id_to_attribute = dict(
         zip(tree_metadata[ID_COLUMN], tree_metadata[training_attribute])
     )
 
     if class_name_remapping is None:
-        # Keep this the same
+        # Keep the class the same as the attribute
         id_to_class = id_to_attribute
     else:
         # Create a mapping which composes first mapping from id to attribute then attribute to class
-        # ids who's attributes do not correspond to a key in class_name_remapping are not included
+        # IDs who's attributes do not correspond to a key in class_name_remapping are not included
         # in the composed mapping
         id_to_class = {
             id: class_name_remapping[attribute]
@@ -296,10 +299,6 @@ def main(
             f"{list(duplicated_rows.itertuples(index=False, name=None))}"
         )
 
-    # Delete the output directory if previously created
-    if output_dir.is_dir():
-        shutil.rmtree(output_dir)
-
     train_datasets = train_val_split.query("train_val=='train'").dataset_id.to_list()
     val_datasets = train_val_split.query("train_val=='val'").dataset_id.to_list()
 
@@ -310,6 +309,10 @@ def main(
         warnings.warn(
             f"The following dataset_IDs overlap between train and val: {list(overlapping_IDs)}"
         )
+
+    # Delete the output directory if previously created
+    if output_dir.is_dir():
+        shutil.rmtree(output_dir)
 
     # Reorganize train and val datasets independently
     for train_val, dataset_IDs in (("train", train_datasets), ("val", val_datasets)):
