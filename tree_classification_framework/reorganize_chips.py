@@ -80,7 +80,7 @@ def reorganize_single_dataset(
     output_dir: Path,
     training_attribute: str,
     class_counters: dict,
-    skipped_unmapped: dict,
+    unmapped_classes: dict,
     reorganization_summary: list,
     class_name_remapping: dict | None,
     live_dead_attribute: str,
@@ -97,7 +97,7 @@ def reorganize_single_dataset(
         output_dir (Path): Where to write the class-level reorganized chips
         training_attribute (str): What attribute from the metadata to reorganize based on
         class_counters (dict): Counters for number of remapped chips per class
-        skipped_unmapped (dict): Counters for number of chips skipped because they weren't in the list of included classes
+        unmapped_classes (dict): Counters for number of chips skipped because they weren't in the list of included classes
         reorganization_summary (list): A running list tracking the reorganization to use downstream for tree-level metrics
         class_name_remapping (dict | None): A dictionary mapping from original new new class names. If None, all classes will be kept.
         live_dead_attribute (str): What attribute determines if a tree is live or dead
@@ -133,13 +133,13 @@ def reorganize_single_dataset(
     if filter_dead_trees:
         # Note that anything other than the literal 'Live' is dropped
         live_trees = tree_metadata[live_dead_attribute] == "Live"
-        dead_tree_IDs = tree_metadata.loc[~live_trees, ID_COLUMN].tolist()
+        dead_tree_IDs = set(tree_metadata.loc[~live_trees, ID_COLUMN].tolist())
         tree_metadata = tree_metadata[live_trees]
         print(
-            f"Dropped {(~live_trees).sum()} of {len(live_trees)} trees predicted as dead from {dataset_name}"
+            f"[{dataset_name}] Dropped {(~live_trees).sum()} of {len(live_trees)} trees predicted as dead from {dataset_name}"
         )
     else:
-        dead_tree_IDs = []
+        dead_tree_IDs = set()
 
     id_to_attribute = dict(
         zip(tree_metadata[ID_COLUMN], tree_metadata[training_attribute])
@@ -165,40 +165,52 @@ def reorganize_single_dataset(
         if (chip_path.is_file() and chip_path.suffix.lower() in IMAGE_EXTS)
     ]
 
+    # Guarantee that every chip has an entry in the metadata file
+    unique_ids = set([chip_path.stem for chip_path in chip_paths])
+    if missing_ids := (
+        unique_ids - set(tree_metadata[ID_COLUMN].unique()).union(dead_tree_IDs)
+    ):
+        raise ValueError(
+            f"The following unique IDs were obtained from chips but had no corresponding row in the tree metadata {missing_ids}"
+        )
+
+    # Count chips which no longer have a class due to the remapping
+    if class_name_remapping is not None and (
+        missing_ids := (unique_ids - set(list(id_to_class.keys())).union(dead_tree_IDs))
+    ):
+        for missing_id in missing_ids:
+            missing_attribute = id_to_attribute[missing_id]
+            unmapped_classes[missing_attribute] += 1
+
     # Hardlink/copy every chip to the output folder for its remapped class
     for chip_path in chip_paths:
         unique_id = chip_path.stem
         output_class = id_to_class.get(unique_id)
 
-        if output_class is not None:
-            reorganized_chip_path = (
-                output_dir
-                / output_class
-                / f"{class_counters[output_class]:06d}{chip_path.suffix.lower()}"
-            )
-            link_or_copy(chip_path, reorganized_chip_path)
-            class_counters[output_class] += 1
+        # This unique ID did not have a class, because the corresponding class was dropped during
+        # the remapping process.
+        if output_class is None:
+            continue
 
-            # Add an entry to the list which tracks the reorganization
-            reorganization_summary.append(
-                {
-                    "image_path": str(reorganized_chip_path),
-                    "class": output_class,
-                    "tree_id": unique_id,
-                    "dataset_id": dataset_name,
-                }
-            )
-        else:
-            # Logging and error checking for un-matched entries
-            if unique_id in id_to_attribute:
-                # Increment count of skipped classes
-                skipped_unmapped[str(id_to_attribute[unique_id])] += 1
-            if not unique_id in dead_tree_IDs:
-                # The only reason a id should not be included in the mapping is if the tree was
-                # removed because it was predicted as dead and therefore dropped.
-                raise ValueError(
-                    f"Unique ID {unique_id} not found in {tree_metadata_path}"
-                )
+        reorganized_chip_path = (
+            output_dir
+            / output_class
+            / f"{class_counters[output_class]:06d}{chip_path.suffix.lower()}"
+        )
+
+        link_or_copy(chip_path, reorganized_chip_path)
+        # Increment class counter
+        class_counters[output_class] += 1
+
+        # Add an entry to the list which tracks the reorganization
+        reorganization_summary.append(
+            {
+                "image_path": str(reorganized_chip_path),
+                "class": output_class,
+                "tree_id": unique_id,
+                "dataset_id": dataset_name,
+            }
+        )
     print(
         f"[{dataset_name}] linked {sum(class_counters.values())} chips "
         f"from {len(id_to_class)} matched trees"
@@ -310,7 +322,7 @@ def main(
 
         # Count the number of chips written per class and the number per class that were skipped
         class_counters = defaultdict(int)
-        skipped_unmapped = defaultdict(int)
+        unmapped_classes = defaultdict(int)
 
         # Iterate over each dataset
         for dataset_ID in dataset_IDs:
@@ -325,7 +337,7 @@ def main(
                 output_dir=dataset_output_dir,
                 training_attribute=attribute_to_train_on,
                 class_counters=class_counters,
-                skipped_unmapped=skipped_unmapped,
+                unmapped_classes=unmapped_classes,
                 reorganization_summary=reorganization_summary,
                 class_name_remapping=class_remapping,
                 live_dead_attribute=live_dead_attribute,
@@ -338,11 +350,11 @@ def main(
         for output_class in sorted(class_counters):
             print(f"  {output_class}: {class_counters[output_class]} chips")
         print(f"  TOTAL: {total} chips across {len(class_counters)} class(es)")
-        if skipped_unmapped:
+        if unmapped_classes:
             print(
                 "Chips skipped (attribute value null or absent from the remapping file):"
             )
-            for raw, count in sorted(skipped_unmapped.items(), key=lambda kv: -kv[1]):
+            for raw, count in sorted(unmapped_classes.items(), key=lambda kv: -kv[1]):
                 print(f"  {raw!r}: {count}")
 
         if total == 0:
