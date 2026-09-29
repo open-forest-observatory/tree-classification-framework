@@ -3,28 +3,43 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import argparse
 
 # Parse inputs
-column_name = "{{inputs.parameters.column-name}}"
-image_level_predictions_file = "{{inputs.parameters.image-level-predictions-file}}"
-input_tree_crowns_path = Path("{{inputs.parameters.input-tree-crowns-file}}")
-input_tree_tops_path = Path("{{inputs.parameters.input-tree-tops-file}}")
-output_tree_crowns_path = Path("{{inputs.parameters.output-tree-crowns-file}}")
-output_tree_tops_path = Path("{{inputs.parameters.output-tree-tops-file}}")
-
-# Open the prediction results
-with open(image_level_predictions_file, "r") as f:
-    preds = json.load(f)
-
-input_files = list(preds.keys())
-labels = list(preds.values())
-
-tree_IDs = [Path(f).stem for f in input_files]
-
-preds_df = pd.DataFrame({"tree_ID": tree_IDs, column_name: labels})
 
 
-def fair_mode(series):
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "image_level_predictions_file",
+        type=Path,
+        help="A .json file with image names as keys and classes as values",
+    )
+    parser.add_argument("column_name", type=str)
+
+    # TODO add help text
+    parser.add_argument(
+        "input_tree_crowns_path",
+        type=Path,
+    )
+    parser.add_argument(
+        "input_tree_tops_path",
+        type=Path,
+    )
+    parser.add_argument(
+        "output_tree_crowns_path",
+        type=Path,
+    )
+    parser.add_argument(
+        "output_tree_tops_path",
+        type=Path,
+    )
+
+    args = parser.parse_args()
+    return args
+
+
+def fair_mode(series, column_name):
     """Tie break randomly if there two or more options"""
     modes = series.mode()
     mode = np.random.choice(modes)
@@ -41,40 +56,68 @@ def fair_mode(series):
     )
 
 
-# Determine most commonly predicted class per tree ID
-grouped = preds_df.groupby(["tree_ID"]).apply(
-    lambda x: fair_mode(x[column_name]), include_groups=False
-)
-grouped = grouped.reset_index().rename(columns={"tree_ID": "unique_ID"})
+def main(
+    column_name,
+    image_level_predictions_file,
+    input_tree_crowns_path,
+    input_tree_tops_path,
+    output_tree_crowns_path,
+    output_tree_tops_path,
+):
+    # Open the prediction results
+    with open(image_level_predictions_file, "r") as f:
+        preds = json.load(f)
 
-# Add the predicted attributes to the detected crowns and tree tops
-## Crowns
-detected_tree_crowns = gpd.read_file(input_tree_crowns_path)
-detected_tree_crowns["unique_ID"] = detected_tree_crowns["unique_ID"].astype(str)
-detected_tree_crowns = detected_tree_crowns.merge(grouped, on="unique_ID", how="left")
+    input_files = list(preds.keys())
+    labels = list(preds.values())
 
-## Tree tops
-detected_tree_tops = gpd.read_file(input_tree_tops_path)
-# Ensure the unique_ID column is a string type
-detected_tree_tops["unique_ID"] = detected_tree_tops["unique_ID"].astype(str)
+    tree_IDs = [Path(f).stem for f in input_files]
 
-# Build the mapping from tree crown ID to tree top ID
-crown_to_tree_top_mapping = {
-    k: v
-    for k, v in zip(
-        detected_tree_crowns["unique_ID"].tolist(),
-        detected_tree_crowns["treetop_unique_ID"].tolist(),
+    preds_df = pd.DataFrame({"tree_ID": tree_IDs, column_name: labels})
+
+    # Determine most commonly predicted class per tree ID
+    grouped = preds_df.groupby(["tree_ID"]).apply(
+        lambda x: fair_mode(x[column_name], column_name=column_name),
+        include_groups=False,
     )
-}
-# Remap the unique_ID attribute to represent tree top IDs rather than crown IDs
-grouped.unique_ID = grouped.unique_ID.replace(crown_to_tree_top_mapping)
-# Merge the predictions into the tree tops
-detected_tree_tops = detected_tree_tops.merge(grouped, on="unique_ID", how="left")
+    grouped = grouped.reset_index().rename(columns={"tree_ID": "unique_ID"})
 
-# create output folders
-output_tree_crowns_path.parent.mkdir(parents=True, exist_ok=True)
-output_tree_tops_path.parent.mkdir(parents=True, exist_ok=True)
+    # Add the predicted attributes to the detected crowns and tree tops
+    ## Crowns
+    detected_tree_crowns = gpd.read_file(input_tree_crowns_path)
+    detected_tree_crowns["unique_ID"] = detected_tree_crowns["unique_ID"].astype(str)
+    detected_tree_crowns = detected_tree_crowns.merge(
+        grouped, on="unique_ID", how="left"
+    )
 
-# Save out
-detected_tree_crowns.to_file(output_tree_crowns_path)
-detected_tree_tops.to_file(output_tree_tops_path)
+    ## Tree tops
+    detected_tree_tops = gpd.read_file(input_tree_tops_path)
+    # Ensure the unique_ID column is a string type
+    detected_tree_tops["unique_ID"] = detected_tree_tops["unique_ID"].astype(str)
+
+    # Build the mapping from tree crown ID to tree top ID
+    crown_to_tree_top_mapping = {
+        k: v
+        for k, v in zip(
+            detected_tree_crowns["unique_ID"].tolist(),
+            detected_tree_crowns["treetop_unique_ID"].tolist(),
+        )
+    }
+    # Remap the unique_ID attribute to represent tree top IDs rather than crown IDs
+    grouped.unique_ID = grouped.unique_ID.replace(crown_to_tree_top_mapping)
+    # Merge the predictions into the tree tops
+    detected_tree_tops = detected_tree_tops.merge(grouped, on="unique_ID", how="left")
+
+    # create output folders
+    output_tree_crowns_path.parent.mkdir(parents=True, exist_ok=True)
+    output_tree_tops_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save out
+    detected_tree_crowns.to_file(output_tree_crowns_path)
+    detected_tree_tops.to_file(output_tree_tops_path)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    main(**args.__dict__)
