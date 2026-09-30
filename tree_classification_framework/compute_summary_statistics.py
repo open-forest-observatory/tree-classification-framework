@@ -49,7 +49,12 @@ def compute_summary_statistics(
     return means, stds
 
 
-def main(dataset_folder: Path | str, extension: str = "", num_files: int | None = None):
+def main(
+    dataset_folder: Path | str,
+    extension: str = "",
+    num_files: int | None = None,
+    output_file: Path | None = None,
+):
     """Compute the channel-wise summary statistics and class names and the number thereof.
 
     Args:
@@ -59,8 +64,10 @@ def main(dataset_folder: Path | str, extension: str = "", num_files: int | None 
             see `compute_summary_statistics
         num_files (int, optional):
             see `compute_summary_statistics
+        output_file (Path, optional)
+            if provided, write the summary statistics to this file. Otherwise they are printed. Defaults to None.
 
-    Prints out the summary as a json-formatted string to stdout
+    Writes to a file or prints to stdout the summary as a json-formatted string
     """
     # It's critical that the classes are sorted
     classes = sorted([p.name for p in list(Path(dataset_folder).glob("*"))])
@@ -77,26 +84,39 @@ def main(dataset_folder: Path | str, extension: str = "", num_files: int | None 
         "stds": stds,
     }
 
-    json.dump(output_dict, sys.stdout)
+    # Print or write the output
+    if output_file is None:
+        json.dump(output_dict, sys.stdout)
+    else:
+        output_file.parent.mkdir(exist_ok=True, parents=True)
+        with open(output_file, "w") as output_file_h:
+            json.dump(output_dict, output_file_h, sort_keys=True, indent=4)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        "This script computes summary statistics of a folder of images, already formatted for classification model training. This includes the channel-wise mean, standard deviation, list of classes and the number of classes. The data is returned in a json representation for easy downstream use"
+        "This script computes summary statistics of a folder of images, already formatted for classification model training. This includes the channel-wise mean, standard deviation, list of classes and the number of classes. The data is returned in a json representation for easy downstream use."
     )
     parser.add_argument(
         "dataset_folder",
+        type=Path,
         help="The input folder to compute the channel-wise mean and std of, as well as list the classes of. This is frequently the training folder.",
     )
     parser.add_argument(
         "--extension",
+        type=str,
         help="Only search for this extension when computing the summary statistics. If unset, all files will be included.",
         default="",
     )
     parser.add_argument(
         "--num-files",
         type=int,
-        help="Subset to this many random files prior to computing statistics",
+        help="Subset to this many random files prior to computing statistics.",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=Path,
+        help="If provided, write the results to this .json file rather than printing them.",
     )
     args = parser.parse_args()
     return args
@@ -105,4 +125,4 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    main(args.dataset_folder, args.extension, args.num_files)
+    main(args.dataset_folder, args.extension, args.num_files, args.output_file)
