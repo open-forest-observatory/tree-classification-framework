@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 import json
+import warnings
 
 import geopandas as gpd
 import numpy as np
@@ -13,7 +14,7 @@ CHIP_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        "Create per-chip classifications to simulate running a prediction model without the computation expense."
+        description="Create per-chip classifications to simulate running a prediction model without the computation expense."
     )
     parser.add_argument(
         "chips_folder", type=Path, help="Path to folder of per-tree chips"
@@ -45,6 +46,12 @@ def parse_args():
         default=FRACTION_MATCHING_MODE,
         help="In the case of random classification, this is the likelihood that each view-level prediction will match the randomly-assigned tree-level class",
     )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=0,
+        help="Controls the randomness in the label selection and noise added to labels",
+    )
     args = parser.parse_args()
 
     return args
@@ -57,21 +64,23 @@ def simulate_predictions(
     reference_attribute: str | None = None,
     class_list: list[str] | None = None,
     fraction_matching_mode: float = FRACTION_MATCHING_MODE,
+    random_seed: int = 0,
 ):
     """Simulate view-level predictions for a folder of per-tree chips and write them to a .json file
 
     Args:
-        class_folder (Path): Path to folder of per-tree chips
+        chips_folder (Path): Path to folder of per-tree chips
         output_file (Path): Path to write simulated predictions as a .json file
         reference_file (Path | None, optional): A geopandas-loadable file with `unique_ID` column that is used to assign labels to trees. Defaults to None.
         reference_attribute (str | None, optional): If reference_file is provided, this attribute of the file is used. Defaults to None.
         class_list (list[str] | None, optional): Classes to use in the case of random classification. Defaults to None.
-        fraction_matching_mode (float, optional): In the case of random classification, this is the likelihood that each view-level prediction will match the randomly-assigned tree-level class. Defaults to 0.75.
+        fraction_matching_mode (float, optional): This is the likelihood that each view-level prediction will match the randomly-assigned tree-level class. Defaults to 0.75.
+        random_seed (int, optional): Controls the randomness in the label selection and noise added to labels. Defaults to 0.
     """
     # Basic argument checks
     if reference_file is not None and reference_attribute is None:
         raise ValueError(
-            f"Cannot provide reference file without a `reference_attribute`"
+            "Cannot provide reference file without a `reference_attribute`"
         )
 
     if reference_file is None and class_list is None:
@@ -79,13 +88,24 @@ def simulate_predictions(
             "If no reference file is provided the class list must be provided instead"
         )
 
-    # List all the files and compute their stem, which represents the ID of the tree that the chip
-    # was generated from
+    if reference_file is not None and class_list is not None:
+        warnings.warn(
+            "The class_list will be ignored in favor of the classes contained in the `reference_file"
+        )
+
+    # Fix randomness for class selection and per-view noise
+    np.random.seed(random_seed)
+
+    # List all the files as absolute paths and compute their stem, which represents the ID of the
+    # tree that the chip was generated from
     chip_files = [
-        f
+        f.resolve()
         for f in chips_folder.rglob("*")
         if f.is_file() and f.suffix.lower() in CHIP_EXTENSIONS
     ]
+    if len(chip_files) == 0:
+        raise ValueError(f"No files found in {chips_folder}")
+
     chip_IDs = [f.stem for f in chip_files]
 
     # Determine which tree IDs are present
@@ -103,6 +123,8 @@ def simulate_predictions(
                 reference_gpd[UNIQUE_ID_COLUMN], reference_gpd[reference_attribute]
             )
         }
+        # Subset to only the IDs for which there are chips
+        IDs_to_class = {ID: IDs_to_class[ID] for ID in unique_IDs}
 
         if len(missing_IDs := set(unique_IDs) - set(IDs_to_class.keys())):
             raise ValueError(
@@ -143,7 +165,7 @@ def simulate_predictions(
     # Save out the dictionary mapping from image path to class
     output_file.parent.mkdir(exist_ok=True, parents=True)
     with open(output_file, "w") as output_file_h:
-        json.dump(output_classes, output_file_h)
+        json.dump(output_classes, output_file_h, sort_keys=True, indent=4)
 
 
 if __name__ == "__main__":
