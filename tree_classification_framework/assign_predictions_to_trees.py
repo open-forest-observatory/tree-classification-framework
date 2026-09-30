@@ -1,5 +1,6 @@
 import argparse
 import json
+import warnings
 from pathlib import Path
 
 import geopandas as gpd
@@ -23,19 +24,19 @@ def parse_args():
         "input_tree_crowns_file", type=Path, help="Path to the detected crowns"
     )
     parser.add_argument(
-        "input_tree_tops_file",
-        type=Path,
-        help="Path to the detected tree tops, which seeded the crowns",
-    )
-    parser.add_argument(
         "output_tree_crowns_file",
         type=Path,
         help="Path where the tree crowns with the additional classification attributes will be written out",
     )
     parser.add_argument(
-        "output_tree_tops_file",
+        "--input-tree-tops-file",
         type=Path,
-        help="Path where the tree tops with the additional classification attributes will be written out",
+        help="Path to the detected tree tops, which seeded the crowns. This are not required.",
+    )
+    parser.add_argument(
+        "--output-tree-tops-file",
+        type=Path,
+        help="Path where the tree tops with the additional classification attributes will be written out. Only needed if --input-tree-tops-file is provided.",
     )
 
     args = parser.parse_args()
@@ -82,9 +83,9 @@ def assign_predictions_to_trees(
     output_column_name: str,
     image_level_predictions_file: Path,
     input_tree_crowns_file: Path,
-    input_tree_tops_file: Path,
     output_tree_crowns_file: Path,
-    output_tree_tops_file: Path,
+    input_tree_tops_file: Path | None = None,
+    output_tree_tops_file: Path | None = None,
 ):
     """Aggregate image-level predictions to per-tree predictions and add them to the crowns and tree tops
 
@@ -92,8 +93,8 @@ def assign_predictions_to_trees(
         output_column_name (str): Name of the attribute column that the predicted classes will be written to
         image_level_predictions_file (Path): A .json file with image names as keys and classes as values
         input_tree_crowns_file (Path): Path to the detected crowns
-        input_tree_tops_file (Path): Path to the detected tree tops, which seeded the crowns
         output_tree_crowns_file (Path): Path where the tree crowns with the additional classification attributes will be written out
+        input_tree_tops_file (Path): Path to the detected tree tops, which seeded the crowns
         output_tree_tops_file (Path): Path where the tree tops with the additional classification attributes will be written out
     """
     # Open the prediction results which contains one class per chip
@@ -125,6 +126,26 @@ def assign_predictions_to_trees(
     detected_tree_crowns = detected_tree_crowns.merge(
         prediction_per_tree, on="unique_ID", how="left"
     )
+    # create output folders and save out crowns
+    output_tree_crowns_file.parent.mkdir(parents=True, exist_ok=True)
+    detected_tree_crowns.to_file(output_tree_crowns_file)
+
+    # Check to see if the tree tops step should be performed
+    if input_tree_tops_file is None or output_tree_tops_file is None:
+        # The next two warnings are in case only one is provided, which indicates an error on the
+        # part of the user.
+        if input_tree_tops_file is not None:
+            # This is the normal case
+            warnings.warn(
+                "Input tree tops file provided but no output tree tops file provided"
+            )
+        if output_tree_tops_file is not None:
+            # This is the normal case
+            warnings.warn(
+                "Output tree tops file provided but no input tree tops file provided"
+            )
+        # Stop before the tree top code
+        return
 
     ## Tree tops are slightly trickier. Tree tops are used as a seed for deleniating the crown.
     # However, tree tops do not record which crown (if any) is created from them. Instead, this
@@ -161,12 +182,8 @@ def assign_predictions_to_trees(
         prediction_per_tree, on="unique_ID", how="left"
     )
 
-    # create output folders
-    output_tree_crowns_file.parent.mkdir(parents=True, exist_ok=True)
+    # create output folders and save out
     output_tree_tops_file.parent.mkdir(parents=True, exist_ok=True)
-
-    # Save out
-    detected_tree_crowns.to_file(output_tree_crowns_file)
     detected_tree_tops.to_file(output_tree_tops_file)
 
 
