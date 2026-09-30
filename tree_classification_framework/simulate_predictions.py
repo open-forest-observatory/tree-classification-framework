@@ -12,7 +12,9 @@ CHIP_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
 
 def parse_args():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        "Create per-chip classifications to simulate running a prediction model without the computation expense."
+    )
     parser.add_argument(
         "chips_folder", type=Path, help="Path to folder of per-tree chips"
     )
