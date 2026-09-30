@@ -16,50 +16,86 @@ LIVE_DEAD_ATTRIBUTE = "live_dead_prediction"
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Reorganize chips into a train/val folder structure for classification. Chips begin structured according to the original folder of images used in photogrammetry and are remapped to a flat folder for each class within the train/val split."
+        description=(
+            "Reorganize chips into a train/val folder structure for classification. "
+            "Chips begin structured according to the original folder of images used in "
+            "photogrammetry and are remapped to a flat folder for each class within "
+            "the train/val split."
+        )
     )
     parser.add_argument(
         "chips_dir",
         type=Path,
-        help="Input chips folder. This should be organized by dataset_ID at the top level, and then each folder within it should be organized in the same structure as the original photogrammetry imagery",
+        help=(
+            "Input chips folder. This should be organized by dataset_ID at the top "
+            "level, and then each folder within it should be organized in the same "
+            "structure as the original photogrammetry imagery"
+        ),
     )
     parser.add_argument(
         "metadata_dir",
         type=Path,
-        help="Input tree-level metadata folder. There should be one file per dataset and each file should be named based on the dataset_ID with the `.gpkg` extension. These files are used to determine what training class each chip is assigned to based on the corresponding tree.",
+        help=(
+            "Input tree-level metadata folder. There should be one file per dataset "
+            "and each file should be named based on the dataset_ID with the `.gpkg` "
+            "extension. These files are used to determine what training class each "
+            "chip is assigned to based on the corresponding tree."
+        ),
     )
     parser.add_argument(
         "train_val_split_file",
         type=Path,
-        help="Path to a .csv defining the train/val split. The file should contain two columns without headers. The first column should be the dataset_ID and the second is 'train' or 'val'",
+        help=(
+            "Path to a .csv defining the train/val split. The file should contain two "
+            "columns without headers. The first column should be the dataset_ID and "
+            "the second is 'train' or 'val'"
+        ),
     )
     parser.add_argument(
         "output_dir",
         type=Path,
-        help="Output directory to write reorganized chips to. The top level folders will be 'train' or 'val' and then each will contain subfolders for each class.",
+        help=(
+            "Output directory to write reorganized chips to. The top level folders "
+            "will be 'train' or 'val' and then each will contain subfolders for each "
+            "class."
+        ),
     )
     parser.add_argument(
         "--attribute-to-train-on",
         type=str,
         default="species_code",
-        help="Column name in the geopackage to use as the class label. Classes specified by this attribute will be remapped as specified by the file supplied to --class-remap-file.",
+        help=(
+            "Column name in the geopackage to use as the class label. Classes "
+            "specified by this attribute will be remapped as specified by the file "
+            "supplied to --class-remap-file."
+        ),
     )
     parser.add_argument(
         "--class-remap-file",
         type=Path,
         default=None,
-        help="JSON file mapping original attribute values to final class names. If not provided, classes are used directly as specified in the .gpkg metadata file(s).",
+        help=(
+            "JSON file mapping original attribute values to final class names. If not "
+            "provided, classes are used directly as specified in the .gpkg metadata "
+            "file(s)."
+        ),
     )
     parser.add_argument(
         "--filter-dead-trees",
         action="store_true",
-        help="If set, drop trees predicted as dead based on the --live-dead-attribute column",
+        help=(
+            "If set, drop trees predicted as dead based on the --live-dead-attribute "
+            "column"
+        ),
     )
     parser.add_argument(
         "--live-dead-attribute",
         type=str,
         default=LIVE_DEAD_ATTRIBUTE,
-        help="Column name in the geopackage indicating whether a tree is live or dead (default: %(default)s)",
+        help=(
+            "Column name in the geopackage indicating whether a tree is live or dead "
+            "(default: %(default)s)"
+        ),
     )
     return parser.parse_args()
 
