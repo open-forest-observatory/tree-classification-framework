@@ -15,7 +15,7 @@ def parse_args():
         help="A .json file with image names as keys and classes as values",
     )
     parser.add_argument(
-        "column_name",
+        "output_column_name",
         help="Name of the attribute that the predicted classes will be written to in the output files.",
         type=str,
     )
@@ -42,25 +42,44 @@ def parse_args():
     return args
 
 
-def fair_mode(series, column_name):
-    """Tie break randomly if there two or more options"""
-    modes = series.mode()
+def compute_per_tree_stats(
+    per_view_predictions: pd.Series, output_column_name: str
+) -> dict:
+    """
+    For a given series of predictions, number of views, fair mode, and fraction of predictions
+    matching the mode
+
+    Args:
+        per_view_predictions (pd.Series): Series of predictions, representing per-view classes
+        output_column_name (str): The name of the predicted attribute to use as the key in the output dictionary.
+
+    Returns:
+        dict:
+            output_column_name: The predicted (modal) class
+            "{output_column_name}_frac_matching_mode": The fraction of predictions matching the modal class
+            "{output_column_name}_n_preds": The number of predictions
+
+    """
+    # Compute the modal class, breaking ties fairly if needed
+    modes = per_view_predictions.mode()
     mode = np.random.choice(modes)
 
-    n_preds = len(series)
+    # Count how many view-level predictions contributed
+    n_preds = len(per_view_predictions)
 
-    frac_matching = (series == mode).sum() / n_preds
+    # Determine agreement with final prediction
+    frac_matching = (per_view_predictions == mode).sum() / n_preds
     return pd.Series(
         {
-            column_name: mode,
-            f"{column_name}_frac_matching_mode": frac_matching,
-            f"{column_name}_n_preds": n_preds,
+            output_column_name: mode,
+            f"{output_column_name}_frac_matching_mode": frac_matching,
+            f"{output_column_name}_n_preds": n_preds,
         }
     )
 
 
 def assign_predictions_to_trees(
-    column_name: str,
+    output_column_name: str,
     image_level_predictions_file: Path,
     input_tree_crowns_file: Path,
     input_tree_tops_file: Path,
@@ -70,7 +89,7 @@ def assign_predictions_to_trees(
     """Aggregate image-level predictions to per-tree predictions and add them to the crowns and tree tops
 
     Args:
-        column_name (str): Name of the attribute column that the predicted classes will be written to
+        output_column_name (str): Name of the attribute column that the predicted classes will be written to
         image_level_predictions_file (Path): A .json file with image names as keys and classes as values
         input_tree_crowns_file (Path): Path to the detected crowns
         input_tree_tops_file (Path): Path to the detected tree tops, which seeded the crowns
@@ -86,11 +105,13 @@ def assign_predictions_to_trees(
 
     tree_IDs = [Path(f).stem for f in input_files]
 
-    preds_df = pd.DataFrame({"unique_ID": tree_IDs, column_name: labels})
+    preds_df = pd.DataFrame({"unique_ID": tree_IDs, output_column_name: labels})
 
-    # Determine most commonly predicted class per tree ID
+    # Determine most commonly predicted class per tree ID and other statistics
     prediction_per_tree = preds_df.groupby(["unique_ID"]).apply(
-        lambda x: fair_mode(x[column_name], column_name=column_name),
+        lambda x: compute_per_tree_stats(
+            x[output_column_name], output_column_name=output_column_name
+        ),
         include_groups=False,
     )
     prediction_per_tree = prediction_per_tree.reset_index()
