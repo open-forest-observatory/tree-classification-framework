@@ -5,10 +5,6 @@ import json
 import geopandas as gpd
 import numpy as np
 
-# Consume a folder of chipped images corresponding to one dataset.
-# Produce a json folder assigning each one a classification
-# The per-view predictions should be structured, corresponding to a per-tree label.
-# This label can either be randomly generated or derived from a reference file.
 FRACTION_MATCHING_MODE = 0.75
 UNIQUE_ID_COLUMN = "unique_ID"
 
@@ -79,39 +75,50 @@ def simulate_predictions(
             "If no reference file is provided the class list must be provided instead"
         )
 
+    # List all the files and compute their stem, which represents the ID of the tree that the chip
+    # was generated from
     chip_files = [f for f in chips_folder.rglob("*") if f.is_file()]
-
     chip_IDs = [f.stem for f in chip_files]
 
+    # Determine which tree IDs are present
     unique_IDs = np.unique(chip_IDs).tolist()
 
-    # Parse or simulate the tree per ID
+    # Create the mapping from tree ID to the per-tree class
     if reference_file is not None:
         reference_gpd = gpd.read_file(reference_file)
-
+        # Create the mapping based on the entries in the file
         IDs_to_class = {
             k: v
             for k, v in zip(
                 reference_gpd[UNIQUE_ID_COLUMN], reference_gpd[reference_attribute]
             )
         }
-        # TODO Check that ll unique IDs are present as keys
+
+        if len(missing_IDs := set(unique_IDs) - set(IDs_to_class.keys())):
+            raise ValueError(
+                f"The following IDs were not included in the reference file: {missing_IDs}"
+            )
 
         class_list = np.unique(list(IDs_to_class.values())).tolist()
     else:
+        # Randomly create the mapping
         IDs_to_class = {ID: np.random.choice(class_list) for ID in unique_IDs}
 
-    output_classes = {
-        chip_file: IDs_to_class[chip_ID]
-        for chip_file, chip_ID in zip(chip_files, chip_IDs)
-    }
-
-    # Correct for the fact that we might re-pick the existing ID, so sample n_classes / (n_classes - 1) times more frequently
+    # Correct for the fact that we might re-pick the existing ID, so sample n_classes / (n_classes - 1)
+    # times more frequently so approximately 1-fraction_matching_mode labels are flipped
     adjusted_threshold = np.clip(
         1 - ((1 - fraction_matching_mode) * len(class_list) / (len(class_list) - 1)),
         0,
         1,
     )
+
+    # Compute the output classes without any noise. This means all values will be the same for each
+    # tree ID.
+    output_classes = {
+        chip_file: IDs_to_class[chip_ID]
+        for chip_file, chip_ID in zip(chip_files, chip_IDs)
+    }
+    # Add random noise to a subset of the per-chip labels.
     output_classes = {
         str(k): str(
             v if np.random.rand() < adjusted_threshold else np.random.choice(class_list)
@@ -119,6 +126,7 @@ def simulate_predictions(
         for k, v in output_classes.items()
     }
 
+    # Save out the dictionary mapping from image path to class
     output_file.parent.mkdir(exist_ok=True, parents=True)
     with open(output_file, "w") as output_file_h:
         json.dump(output_classes, output_file_h)
