@@ -1,7 +1,7 @@
 import argparse
-from pathlib import Path
 import json
 import warnings
+from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
