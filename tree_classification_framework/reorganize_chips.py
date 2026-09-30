@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument(
         "metadata_dir",
         type=Path,
-        help="Input tree-level metadata folder. There should be one file per dataset and each file should be named based on the dataset_ID with the `.gpkg` extension",
+        help="Input tree-level metadata folder. There should be one file per dataset and each file should be named based on the dataset_ID with the `.gpkg` extension. These files are used to determine what training class each chip is assigned to based on the corresponding tree.",
     )
     parser.add_argument(
         "train_val_split_file",
@@ -39,27 +39,27 @@ def parse_args():
         help="Output directory to write reorganized chips to. The top level folders will be 'train' or 'val' and then each will contain subfolders for each class.",
     )
     parser.add_argument(
-        "--class-remap-file",
-        type=Path,
-        default=None,
-        help="JSON file mapping original attribute values to final class names",
-    )
-    parser.add_argument(
         "--attribute-to-train-on",
         type=str,
         default="species_code",
-        help="Column name in the geopackage to use as the class label",
+        help="Column name in the geopackage to use as the class label. Classes specified by this attribute will be remapped as specified by the file supplied to --class-remap-file.",
+    )
+    parser.add_argument(
+        "--class-remap-file",
+        type=Path,
+        default=None,
+        help="JSON file mapping original attribute values to final class names. If not provided, classes are used directly as specified in the .gpkg metadata file(s).",
     )
     parser.add_argument(
         "--filter-dead-trees",
         action="store_true",
-        help="If set, drop trees predicted as dead based on the --dead-trees-attribute column",
+        help="If set, drop trees predicted as dead based on the --live-dead-attribute column",
     )
     parser.add_argument(
         "--live-dead-attribute",
         type=str,
         default=LIVE_DEAD_ATTRIBUTE,
-        help="Column name in the geopackage indicating whether a tree is live or dead (default: live_dead_predicted)",
+        help="Column name in the geopackage indicating whether a tree is live or dead (default: %(default)s)",
     )
     return parser.parse_args()
 
@@ -225,8 +225,8 @@ def main(
     metadata_dir: Path,
     train_val_split_file: Path,
     output_dir: Path,
-    class_remap_file: Path | None = None,
     attribute_to_train_on: str = "species_code",
+    class_remap_file: Path | None = None,
     filter_dead_trees: bool = False,
     live_dead_attribute: str = "live_dead_prediction",
 ):
@@ -240,7 +240,9 @@ def main(
             photogrammetry imagery.
         metadata_dir (Path):
             Input tree-level metadata folder. There should be one file per dataset and each file
-            should be named based on the dataset_ID with the `.gpkg` extension.
+            should be named based on the dataset_ID with the `.gpkg` extension. These files are
+            used to determine what training class each chip is assigned to based on the
+            corresponding tree.
         train_val_split_file (Path):
             Path to a .csv defining the train/val split. The file should contain two columns
             without headers. The first column should be the dataset_ID and the second is 'train'
@@ -249,17 +251,19 @@ def main(
             Output directory to write reorganized chips to. The top level folders will be 'train'
             or 'val' and then each will contain subfolders for each class. Any existing contents
             are deleted.
-        class_remap_file (Path | None, optional):
-            JSON file mapping original attribute values to final class names. If None, every
-            class is kept unchanged. Defaults to None.
         attribute_to_train_on (str, optional):
-            Column name in the geopackage to use as the class label. Defaults to "species_code".
+            Column name in the geopackage to use as the class label. Classes specified by this
+            attribute will be remapped as specified by `class_remap_file`. Defaults to
+            "species_code".
+        class_remap_file (Path | None, optional):
+            JSON file mapping original attribute values to final class names. If None, classes
+            are used directly as specified in the .gpkg metadata file(s). Defaults to None.
         filter_dead_trees (bool, optional):
-            If set, drop trees predicted as dead based on the `dead_trees_attribute` column.
+            If set, drop trees predicted as dead based on the `live_dead_attribute` column.
             Defaults to False.
         live_dead_attribute (str, optional):
             Column name in the geopackage indicating whether a tree is live or dead. Defaults to
-            "predicted_health_status".
+            "live_dead_prediction".
     """
     # Load the class remapping (original attribute value -> final class name). With no file
     # provided, keep all classes unchanged
