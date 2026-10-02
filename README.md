@@ -17,13 +17,11 @@ In the future, use the created conda environment for all operations.
 
 An example command using the example data is below.
 ```
-python tree_classification_framework/reorganize_chips.py \
-  data/chips/ \
-  data/tree_metadata/ \
-  data/train_val_split.csv \
-  data/training_data \
-  --class-remap-file data/class-names-remapping.json \
-  --filter-dead --live-dead-attribute live_dead_prediction
+python tree_classification_framework/chip_images.py \
+  data/images/001438_001437_0003/ \
+  data/renders/001438_001437_0003/ \
+  data/chips/001438_001437_0003 \
+  --n-workers 4
 ```
 
 ### `reorganize_chips.py`
@@ -31,10 +29,13 @@ The previous chipping step creates one image per view of each tree. These are st
 
 An example command using the example data is below.
 ```
-python tree_classification_framework/compute_summary_statistics.py \
-  data/training_data/train \
-   --extension .png \
-   --num-files 100
+python tree_classification_framework/reorganize_chips.py \
+  data/chips/ \
+  data/tree_crowns_matched/ \
+  data/train_val_split.csv \
+  data/training_data \
+  --class-remap-file data/class-names-remapping.json \
+  --filter-dead --live-dead-attribute live_dead_prediction
 ```
 
 
@@ -43,11 +44,10 @@ The reorganization step creates a folder of images formatted based on the [Image
 
 An example command using the example data is below.
 ```
-python tree_classification_framework/simulate_predictions.py \
-  data/chips/001438_001437_0003/ \
-  data/predictions/001438_001437_0003.json \
-  --reference-file data/tree_crowns_matched/001438_001437_0003.gpkg \
-  --reference-attribute "species_code"
+python tree_classification_framework/compute_summary_statistics.py \
+  data/training_data/train \
+   --extension .png \
+   --num-files 400
 ```
 
 ### `simulate_predictions.py`
