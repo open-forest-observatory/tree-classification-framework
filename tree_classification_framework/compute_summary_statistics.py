@@ -95,7 +95,7 @@ def main(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        "This script computes summary statistics of a folder of images, already formatted for classification model training. This includes the channel-wise mean, standard deviation, list of classes and the number of classes. The data is returned in a json representation for easy downstream use."
+        description="This script computes summary statistics of a folder of images, already formatted for classification model training. This includes the channel-wise mean, standard deviation, list of classes and the number of classes. The data is returned in a json representation for easy downstream use."
     )
     parser.add_argument(
         "dataset_folder",
