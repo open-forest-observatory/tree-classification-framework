@@ -153,11 +153,10 @@ def reorganize_single_dataset(
     tree_metadata = gpd.read_file(tree_metadata_path)
 
     # Check columns
-    for required in (
-        (ID_COLUMN, training_attribute) + (live_dead_attribute,)
-        if filter_dead_trees
-        else ()
+    for required in (ID_COLUMN, training_attribute) + (
+        (live_dead_attribute,) if filter_dead_trees else ()
     ):
+
         if required not in tree_metadata.columns:
             raise ValueError(
                 f"[{dataset_name}] column '{required}' not found in {tree_metadata_path}; "
@@ -165,7 +164,7 @@ def reorganize_single_dataset(
             )
     tree_metadata[ID_COLUMN] = tree_metadata[ID_COLUMN].astype(str)
     # Drop any rows with critical elements that are na
-    tree_metadata.dropna(axis=0, subset=[ID_COLUMN, training_attribute])
+    tree_metadata.dropna(axis=0, subset=[ID_COLUMN, training_attribute], inplace=True)
 
     # Drop rows which are not predicted as live if requested
     if filter_dead_trees:
