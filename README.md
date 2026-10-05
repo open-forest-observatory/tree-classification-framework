@@ -1,4 +1,15 @@
 ## Overview
+The goal of this project is to support an end-to-end workflow for generating tree species prediction from individual views of the trees captured by drone images. It is developed as part of the [Open Forest Observatory](https://openforestobservatory.org/), which provides data and tools to support automated forest mapping and monitoring. This project serves as a light-weight connector between other Open Forest Observatory tools, including [geograypher](https://github.com/open-forest-observatory/geograypher), [tree-detection-framework](https://github.com/open-forest-observatory/tree-detection-framework), [tree-registration-and-matching](https://github.com/open-forest-observatory/tree-registration-and-matching), and our fork of [mmpretrain](https://github.com/open-forest-observatory/mmpretrain). There are two related workflows enabled by this project. The first is supporting training per-view species predictions models, using field reference information. The second is generating species predictions on unlabeled trees.
+
+### Training workflow
+The goal of this workflow is to train a per-view species prediction model starting with field reference species information. Trees are detected with the `tree-detection-framework` and then matched to field trees using the `tree-registration-and-matching` project. Then, using `geograypher`, the masks representing the locations of each tree as observed from each image rendered to the perspective of each image.
+
+Within this project, the `chip_images.py` script saves out one image per view, per tree. This process optionally masks out background content. Importantly, the tree ID is preserved so these chips can be linked to the trees that generated them, which in turn can provide species information. Then, the `reorganize_chips.py` script is used to restructure this data into training and validation folders, organized per class. The `compute_summary_statistics.py` script is used to extract the metrics needed for model training from this data. Finally, an `mmpretrain` classification model can be trained using the [train.py](https://github.com/open-forest-observatory/mmpretrain/blob/main/tools/train.py) script.
+
+
+### Inference workflow
+The inference work starts with detected trees and geograypher renders of their locations onto the perspective of each image. Then, the `chip_images.py` script is used create one chip per view, which encodes the tree ID that generated the chip. Using a trained `mmpretrain` model, the [predict.py](https://github.com/open-forest-observatory/mmpretrain/blob/main/tools/predict.py) script is used to generate one class prediction per chip. Then the `assign_predictions_to_trees.py` script is used to map these prediction back to individual trees.
+
 
 ## Install
 To install you must have `poetry` and `conda` installed. Then run the following commands.
